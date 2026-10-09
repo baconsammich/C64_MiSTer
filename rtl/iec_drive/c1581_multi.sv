@@ -94,7 +94,15 @@ end
 wire [7:0] rom_do;
 generate
 	if(PARPORT || DUALROM) begin
-		iecdrv_mem #(8,15,"./c1581_rom.mif") rom
+		// Runtime-loadable ROM (e.g. a CMD FD or JiffyDOS image written by QNICE).
+		// No INITFILE: the contents arrive over the rom_* port, exactly as in
+		// c1541_multi.sv's DUALROM branch. iecdrv_mem has no INITFILE or
+		// FALLING_A parameter - only iecdrv_mem_rom does.
+		iecdrv_mem_rom #(
+		   .DATAWIDTH(8),
+		   .ADDRWIDTH(15),
+		   .FALLING_A(1'b1)
+		) rom
 		(
 			.clock_a(clk_sys),
 			.address_a(rom_addr),

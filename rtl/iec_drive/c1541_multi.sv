@@ -136,7 +136,7 @@ wire [7:0] rom_do;
 wire [7:0] qnice_rom2_do;
 generate
 	if(PARPORT) begin
-		iecdrv_mem #(
+		iecdrv_mem_rom #(
 		   .DATAWIDTH(8),
 		   .ADDRWIDTH(15),
 		   .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1541_dolphin.mif.hex"),
