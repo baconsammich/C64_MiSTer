@@ -28,6 +28,11 @@ module fdc1772 (
 	input            clkcpu, // system cpu clock.
 	input            clk8m_en,
 
+	// SD/host-side clock. On MiSTer this was the same as clkcpu; on the MEGA65
+	// the SD block interface lives in QNICE's clock domain, so the SD side of
+	// this module is clocked separately. See doc/cmd_devices.md.
+	input            clk_sys,
+
 	// external set signals
 	input      [W:0] floppy_drive,
 	input            floppy_side, 
@@ -77,17 +82,27 @@ localparam WIDX = $clog2(FD_NUM);
 // --------------------- IO controller image handling ----------------------
 // -------------------------------------------------------------------------
 
+// The LBA is computed combinationally from track/sector/fd_spt, which includes
+// a multiply. It is then consumed in the QNICE clock domain, so register it
+// here first: that keeps the multiplier out of the clock-domain crossing (an
+// 18-level combinational path across it cannot be timed) and makes the value a
+// stable flop output, which is what lets the crossing be declared safe. The
+// address is only read after a synchronised sd_rd/sd_wr request, many cycles
+// later, so the extra cycle of latency is immaterial.
+reg [31:0] sd_lba_comb;
 always @(*) begin
 	case (SECTOR_SIZE_CODE)
 	// archie
-	3: sd_lba = {(16'd0 + (fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0], s_odd };
+	3: sd_lba_comb = {(16'd0 + (fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0], s_odd };
 	// st
-	2: sd_lba = ((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0] - 1'd1;
+	2: sd_lba_comb = ((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0] - 1'd1;
 	// bbc micro
-	1: sd_lba = (((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0]) >> 1;
-	default: sd_lba = 0;
+	1: sd_lba_comb = (((fd_spt*track[6:0]) << fd_doubleside) + (floppy_side ? 5'd0 : fd_spt) + sector[4:0]) >> 1;
+	default: sd_lba_comb = 0;
 	endcase
 end
+
+always @(posedge clkcpu) sd_lba <= sd_lba_comb;
 
 reg  [10:0] fdn_sector_len[FD_NUM];
 reg   [4:0] fdn_spt[FD_NUM];     // sectors/track
@@ -714,7 +729,10 @@ end
 
 fdc1772_dpram #(8, 10) fifo
 (
-	.clock(clkcpu),
+	// Port A is the SD side: address, data and write enable all come from the
+	// QNICE domain, so it must be clocked from there.
+	.clock_a(clk_sys),
+	.clock_b(clkcpu),
 
 	.address_a(fifo_sdptr),
 	.data_a(sd_dout),
@@ -736,13 +754,26 @@ reg [1:0] sd_state;
 reg       sd_card_write;
 reg       sd_card_read;
 
-always @(posedge clkcpu) begin : label3
+// This FSM talks to the SD block interface, so on the MEGA65 it belongs in the
+// QNICE clock domain: sd_ack arrives from there and sd_rd/sd_wr are consumed
+// there, which is how the C1541 is arranged (c1541_drv runs c1541_track on
+// clk_sys). Its only inputs from the floppy side are the two single-bit
+// request flags, which are brought across with two-stage synchronisers.
+reg [1:0] sd_card_read_sync, sd_card_write_sync;
+always @(posedge clk_sys) begin
+	sd_card_read_sync  <= {sd_card_read_sync[0],  sd_card_read};
+	sd_card_write_sync <= {sd_card_write_sync[0], sd_card_write};
+end
+wire sd_card_read_s  = sd_card_read_sync[1];
+wire sd_card_write_s = sd_card_write_sync[1];
+
+always @(posedge clk_sys) begin : label3
 	reg sd_ackD;
 	reg sd_card_readD;
 	reg sd_card_writeD;
 
-	sd_card_readD <= sd_card_read;
-	sd_card_writeD <= sd_card_write;
+	sd_card_readD <= sd_card_read_s;
+	sd_card_writeD <= sd_card_write_s;
 	sd_ackD <= sd_ack;
 	if (sd_ack) {sd_rd, sd_wr} <= 0;
 
@@ -750,11 +781,11 @@ always @(posedge clkcpu) begin : label3
 	SD_IDLE:
 	begin
 		s_odd <= 1'b0;
-		if (~sd_card_readD & sd_card_read) begin
+		if (~sd_card_readD & sd_card_read_s) begin
 			sd_rd[fdn] <= 1;
 			sd_state <= SD_READ;
 		end
-		else if (~sd_card_writeD & sd_card_write) begin
+		else if (~sd_card_writeD & sd_card_write_s) begin
 			sd_wr[fdn] <= 1;
 			sd_state <= SD_WRITE;
 		end
@@ -1026,9 +1057,13 @@ end
 
 endmodule
 
+// Dual-CLOCK, dual-port RAM. The MEGA65 port runs the SD side of the drive in
+// QNICE's clock domain and the floppy side in the core clock domain, so port A
+// and port B need separate clocks. (On MiSTer both were the same clock.)
 module fdc1772_dpram #(parameter DATAWIDTH=8, ADDRWIDTH=9)
 (
-	input                   clock,
+	input                   clock_a,
+	input                   clock_b,
 
 	input   [ADDRWIDTH-1:0] address_a,
 	input   [DATAWIDTH-1:0] data_a,
@@ -1043,7 +1078,7 @@ module fdc1772_dpram #(parameter DATAWIDTH=8, ADDRWIDTH=9)
 
 reg [DATAWIDTH-1:0] ram[0:(1<<ADDRWIDTH)-1];
 
-always @(posedge clock) begin
+always @(posedge clock_a) begin
 	if(wren_a) begin
 		ram[address_a] <= data_a;
 		q_a <= data_a;
@@ -1052,7 +1087,7 @@ always @(posedge clock) begin
 	end
 end
 
-always @(posedge clock) begin
+always @(posedge clock_b) begin
 	if(wren_b) begin
 		ram[address_b] <= data_b;
 		q_b <= data_b;

@@ -235,6 +235,7 @@ fdc1772 #(.SECTOR_SIZE_CODE(2), .SECTOR_BASE(1), .EXT_MOTOR(1), .FD_NUM(1)) fdc
 (
 	.clkcpu(clk),
 	.clk8m_en(wd_ce),
+	.clk_sys(clk_sys),
 
 	.floppy_drive(1'b0),
 	.floppy_side(~side), 
