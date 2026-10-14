@@ -62,7 +62,17 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input   [7:0] rom_data_i,
 	output  [7:0] rom_data_o,
 	input         rom_wr_i,
-	input         rom_std_i,
+	// MEGA65: one rom_std per drive model, not one for both.
+	//
+	// Upstream had a single rom_std_i, and main.vhd drove it from the C64 KERNAL
+	// selection: factory drive DOS with a stock KERNAL, custom DOS with JiffyDOS.
+	// That coupling cannot express "CMD FD DOS on the 1581 while the C64 runs a
+	// stock KERNAL", which is exactly what the CMD FD support needs, so the two
+	// drive models now choose independently. main.vhd ties rom_std_1541_i to the
+	// KERNAL selection as before, and drives rom_std_1581_i from the 1581 DOS
+	// menu setting.
+	input         rom_std_1541_i,
+	input         rom_std_1581_i,
 
 	// ---------------------------------------------------------------------
 	// MEGA65 physical internal 1581 (issue #90): drive-0 flat toggle/level ABI
@@ -220,7 +230,7 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 	.rom_data_i(rom_data_i),
 	.rom_data_o(c1541_rom_data_o),
 	.rom_wr_i(~rom_addr_i[15] & rom_wr_i),
-	.rom_std_i(rom_std_i),
+	.rom_std_i(rom_std_1541_i),
 
 	.img_mounted(img_mounted),
 	.img_size(img_size),
@@ -275,7 +285,7 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.rom_data(rom_data_i),
 	.rom_data_o(c1581_rom_data_o),
 	.rom_wr(rom_addr_i[15] & rom_wr_i),
-	.rom_std(rom_std_i),
+	.rom_std(rom_std_1581_i),
 
 	.img_mounted(img_mounted),
 	.img_size(img_size),
