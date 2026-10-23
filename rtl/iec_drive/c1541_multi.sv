@@ -67,6 +67,14 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// module having to know the slot numbering.
 	input         rom_ii_wr_i,
 	output  [7:0] rom_ii_data_o,
+
+	// MEGA65: one 16 KB slot PER DRIVE, holding whatever ROM file the user picked for that
+	// drive in the browser. Per drive and not shared, because the point is that drive 8 and
+	// drive 9 can run different ROMs. One write port serves all of them: rom_own_sel_i says
+	// which drive QNICE is addressing, and the readback follows the same select.
+	input   [1:0] rom_own_sel_i,
+	input         rom_own_wr_i,
+	output  [7:0] rom_own_data_o,
 	
 	// clk clock domain
 	// MEGA65: ONE BIT PER DRIVE rather than one for the whole chip, so each drive picks the
@@ -80,7 +88,12 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// stock 1541 DOS. Only consulted where rom_std_i is 1: JiffyDOS replaces the DOS outright,
 	// so a drive asking for it gets the custom slot whichever model it is -- which is what a
 	// real JiffyDOS chip in a real 1541-II does.
-	input   [N:0] rom_ii_i
+	input   [N:0] rom_ii_i,
+
+	// MEGA65: 1 = this drive runs the ROM loaded into its own slot. Highest priority of the
+	// three, because it is the only one the user chose by name; the caller gates it on a file
+	// having actually arrived (see drive_rom_sel_proc in main.vhd).
+	input   [N:0] rom_own_i
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -108,6 +121,13 @@ assign rom_data_o = (DUALROM || PARPORT) ? qnice_rom2_do : qnice_rom1_do;
 // rom_std_i so the custom slot always wins; the caller gates rom_ii_i itself on the ROM file
 // having turned up, so an unprovisioned slot can never be selected (see main.vhd).
 wire [N:0] romii_sel = rom_ii_i & stdrom;
+
+// MEGA65: the per-drive slot wins over both of the above. Three ways to choose a DOS is one
+// more than can be left ambiguous, and a file the user picked by name is the least surprising
+// winner.
+wire [N:0] romown_sel = rom_own_i;
+wire [7:0] romown_do[NDR];
+wire [7:0] romown_qa[NDR];
 
 reg ph2_r;
 reg ph2_f;
@@ -246,6 +266,36 @@ iecdrv_mem_rom #(
 	.q_b(romii_do)
 );
 
+// MEGA65: one per drive. INITFILEd with the stock 1541 DOS like the two slots above, so a
+// drive whose slot was never filled still holds working code; main.vhd additionally refuses to
+// select a slot until a write has landed at its TOP address, which is what keeps a file that is
+// too short to be a drive DOS from arming it.
+generate
+	genvar gi;
+	for (gi = 0; gi < NDR; gi = gi + 1) begin : own_roms
+		iecdrv_mem_rom #(
+		   .DATAWIDTH(8),
+		   .ADDRWIDTH(14),
+		   .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1541_rom.mif.hex"),
+		   .FALLING_A(1'b1)
+		) romown (
+			.clock_a(clk_sys),
+			.address_a(rom_addr_i[13:0]),
+			.data_a(rom_data_i),
+			.wren_a(rom_own_wr_i & (rom_own_sel_i == gi[1:0])),
+			.q_a(romown_qa[gi]),
+
+			.clock_b(clk),
+			.address_b(mem_a[13:0]),
+			.q_b(romown_do[gi])
+		);
+	end
+endgenerate
+
+// Readback follows the same select. Clamped, because rom_own_sel_i is two bits whatever DRIVES
+// is and an out-of-range index into an unpacked array is not a value.
+assign rom_own_data_o = romown_qa[(rom_own_sel_i < NDR) ? rom_own_sel_i : 2'd0];
+
 wire [14:0] drv_addr[NDR];
 reg   [7:0] drv_data[4];
 always @(posedge clk) begin
@@ -260,9 +310,11 @@ always @(posedge clk) begin
 	endcase
 	
 	case(state)
-		// MEGA65: three-way now -- custom (JiffyDOS) slot, stock 1541-II, stock 1541.
-		3,4,5,6: drv_data[state[1:0] - 2'd3] <= !stdrom[state[1:0] - 2'd3] ? rom_do    :
-		                                     romii_sel[state[1:0] - 2'd3]  ? romii_do  : romstd_do;
+		// MEGA65: four-way now -- this drives own loaded slot, the custom (JiffyDOS) slot,
+		// the stock 1541-II, the stock 1541. In that order of priority.
+		3,4,5,6: drv_data[state[1:0] - 2'd3] <= romown_sel[state[1:0] - 2'd3] ? romown_do[state[1:0] - 2'd3] :
+		                                           !stdrom[state[1:0] - 2'd3] ? rom_do                       :
+		                                         romii_sel[state[1:0] - 2'd3] ? romii_do                     : romstd_do;
 	endcase
 end
 

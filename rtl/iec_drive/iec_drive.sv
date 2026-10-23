@@ -63,7 +63,7 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// the drive models stopped sharing one ROM each. The slots are assigned in the QNICE
 	// device decode in mega65.vhd, one C_DEV_C64_* device each:
 	//    0 = 1541 custom DOS (JiffyDOS), 16 KB   2 = stock 1541-II DOS, 16 KB
-	//    1 = 1581 custom DOS (JiffyDOS), 32 KB   3..7 = free
+	//    1 = 1581 custom DOS (JiffyDOS), 32 KB   3 + drive = that drives own slot, 16 KB
 	input  [17:0] rom_addr_i,
 	input   [7:0] rom_data_i,
 	output reg [7:0] rom_data_o,
@@ -85,6 +85,10 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// Only consulted where rom_std_i is 1 -- JiffyDOS replaces the DOS outright, so it wins on
 	// either model. The 1581 has no second model, hence no twin vector for it.
 	input   [N:0] rom_ii_i,
+
+	// MEGA65: 1 = this drive runs the ROM file the user loaded into its own slot, which beats
+	// both of the vectors above. Gated by the caller on a file having arrived.
+	input   [N:0] rom_own_i,
 
 	// ---------------------------------------------------------------------
 	// MEGA65 physical internal 1581 (issue #90): drive-0 flat toggle/level ABI
@@ -197,14 +201,17 @@ assign par_data_o   = c1581_par_o    & c1541_par_o;
 // the auto-loader never reads ROMs back; this is forward-proofing for any future
 // verify-after-write of a streamed drive DOS image.)
 wire [2:0] rom_slot = rom_addr_i[17:15];
-wire [7:0] c1541_rom_data_o, c1581_rom_data_o, c1541ii_rom_data_o;
+wire       rom_slot_own = (rom_slot >= 3'd3) && (rom_slot <= 3'd6);  // slot 3 + drive
+wire [1:0] rom_own_sel  = rom_slot - 3'd3;             // slot 3..6 -> drive 0..3
+wire [7:0] c1541_rom_data_o, c1581_rom_data_o, c1541ii_rom_data_o, c1541own_rom_data_o;
 reg  [2:0] rom_sel_d;
 always @(negedge clk_sys) rom_sel_d <= rom_slot;
 always_comb begin
 	case(rom_sel_d)
 		3'd1:    rom_data_o = c1581_rom_data_o;
 		3'd2:    rom_data_o = c1541ii_rom_data_o;
-		default: rom_data_o = c1541_rom_data_o;
+		3'd0:    rom_data_o = c1541_rom_data_o;
+		default: rom_data_o = c1541own_rom_data_o;
 	endcase
 end
 
@@ -251,8 +258,12 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 	.rom_wr_i(rom_wr_i & (rom_slot == 3'd0)),
 	.rom_ii_wr_i(rom_wr_i & (rom_slot == 3'd2)),
 	.rom_ii_data_o(c1541ii_rom_data_o),
+	.rom_own_sel_i(rom_own_sel),
+	.rom_own_wr_i(rom_wr_i & rom_slot_own),
+	.rom_own_data_o(c1541own_rom_data_o),
 	.rom_std_i(rom_std_i),
 	.rom_ii_i(rom_ii_i),
+	.rom_own_i(rom_own_i),
 
 	.img_mounted(img_mounted),
 	.img_size(img_size),
