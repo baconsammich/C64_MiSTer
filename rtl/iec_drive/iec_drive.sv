@@ -62,7 +62,18 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input   [7:0] rom_data_i,
 	output  [7:0] rom_data_o,
 	input         rom_wr_i,
-	input         rom_std_i,
+	// MEGA65: one bit per drive, and one vector per ENGINE. 1 = that drive runs the factory
+	// DOS, 0 = the custom (JiffyDOS) one. This was a single bit for the whole chip, wired to
+	// the C64 KERNAL choice, so the drives could be set neither independently of the computer
+	// nor of each other.
+	//
+	// Two vectors because the two engines have two separate custom ROMs, loaded from two
+	// different files (jd-c1541.bin and jd-c1581.bin) into two different QNICE devices. The
+	// caller gates each one on ITS OWN file having turned up, so asking for JiffyDOS on a
+	// drive whose engine has no custom ROM leaves that drive on the factory DOS instead of
+	// running it out of blank memory.
+	input   [N:0] rom_std_i,
+	input   [N:0] rom_std_1581_i,
 
 	// ---------------------------------------------------------------------
 	// MEGA65 physical internal 1581 (issue #90): drive-0 flat toggle/level ABI
@@ -275,7 +286,7 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.rom_data(rom_data_i),
 	.rom_data_o(c1581_rom_data_o),
 	.rom_wr(rom_addr_i[15] & rom_wr_i),
-	.rom_std(rom_std_i),
+	.rom_std(rom_std_1581_i),
 
 	.img_mounted(img_mounted),
 	.img_size(img_size),

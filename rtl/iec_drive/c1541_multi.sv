@@ -62,7 +62,12 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input         rom_wr_i,
 	
 	// clk clock domain
-	input         rom_std_i
+	// MEGA65: ONE BIT PER DRIVE rather than one for the whole chip, so each drive picks the
+	// standard DOS or the custom (JiffyDOS) one on its own -- which is what a real stack of
+	// drives does, you fit the ROM you want in each. This costs no extra memory: the fetch
+	// state machine below already reads one byte per drive in its own slot, and both ROMs
+	// already exist side by side.
+	input   [N:0] rom_std_i
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -76,7 +81,7 @@ iecdrv_sync clk_sync(clk, iec_clk_i,  iec_clk);
 wire [N:0] reset_drv;
 iecdrv_sync #(NDR) rst_sync(clk, reset, reset_drv);
 
-wire stdrom = (DUALROM || PARPORT) ? rom_std_i : 1'b1;
+wire [N:0] stdrom = (DUALROM || PARPORT) ? rom_std_i : {NDR{1'b1}};
 
 reg  [14:0] mem_a;
 wire [7:0] rom_do;
@@ -206,11 +211,11 @@ always @(posedge clk) begin
 	if(ph2_f)   state <= 0;
 
 	case(state)
-		0,1,2,3: mem_a <= {drv_addr[state[1:0]][14] & rom_sz_main[1], drv_addr[state[1:0]][13] & (rom_sz_main[0] | stdrom), drv_addr[state[1:0]][12:0]};
+		0,1,2,3: mem_a <= {drv_addr[state[1:0]][14] & rom_sz_main[1], drv_addr[state[1:0]][13] & (rom_sz_main[0] | stdrom[state[1:0]]), drv_addr[state[1:0]][12:0]};
 	endcase
 	
 	case(state)
-		3,4,5,6: drv_data[state[1:0] - 2'd3] <= stdrom ? romstd_do : rom_do;
+		3,4,5,6: drv_data[state[1:0] - 2'd3] <= stdrom[state[1:0] - 2'd3] ? romstd_do : rom_do;
 	endcase
 end
 
@@ -218,7 +223,7 @@ wire [N:0] iec_data_d, iec_clk_d;
 assign     iec_clk_o  = &{iec_clk_d  | reset_drv};
 assign     iec_data_o = &{iec_data_d | reset_drv};
 
-wire [N:0] ext_en = {NDR{rom_sz_main[1] & empty8k_main & ~stdrom & |PARPORT}} & ~reset_drv;
+wire [N:0] ext_en = {NDR{rom_sz_main[1] & empty8k_main & (|PARPORT)}} & ~stdrom & ~reset_drv;
 wire [7:0] par_data_d[NDR];
 wire [N:0] par_stb_d;
 assign     par_stb_o = &{par_stb_d | ~ext_en};

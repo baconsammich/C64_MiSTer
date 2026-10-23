@@ -54,7 +54,8 @@ module c1581_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input   [7:0] rom_data,
 	output  [7:0] rom_data_o,
 	input         rom_wr,
-	input         rom_std,
+	// MEGA65: one bit per drive, see the same port on c1541_multi
+	input   [N:0] rom_std,
 
 	// ---------------------------------------------------------------------
 	// MEGA65 physical internal 1581 (issues #90 and #93): per-drive phys ABI,
@@ -128,7 +129,7 @@ iecdrv_sync fclk_sync(clk, iec_fclk_i, iec_fclk);
 wire [N:0] reset_drv;
 iecdrv_sync #(NDR) rst_sync(clk, reset, reset_drv);
 
-wire stdrom = (DUALROM || PARPORT) ? rom_std : 1'b1;
+wire [N:0] stdrom = (DUALROM || PARPORT) ? rom_std : {NDR{1'b1}};
 
 reg ph2_r;
 reg ph2_f;
@@ -218,7 +219,7 @@ always @(posedge clk) begin
 	endcase
 	
 	case(state)
-		3,4,5,6: drv_data[state[1:0] - 2'd3] <= stdrom ? romstd_do : rom_do;
+		3,4,5,6: drv_data[state[1:0] - 2'd3] <= stdrom[state[1:0] - 2'd3] ? romstd_do : rom_do;
 	endcase
 end
 
