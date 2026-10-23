@@ -300,3 +300,87 @@ always @(posedge clock_b) begin
 	end
 end
 */
+
+
+/*
+   iecdrv_reset_filter and iecdrv_trackmem below come from the MiSTer C128 core
+   (github.com/eilers/C128_MiSTer, branch Mega65_main), which is where the
+   unified 1541/1571 drive family lives. Taken verbatim.
+
+   iecdrv_trackmem was an altsyncram instance upstream, which Vivado cannot
+   synthesize; that port had already been done in the C128 MEGA65 branch, so this
+   is inferred block RAM and needs no dualport_2clk_ram wrapper. Note its array
+   covers the whole address space rather than WORDS entries, because callers read
+   past the end of a track and mask afterwards -- so ADDRWIDTH, not WORDS, sets
+   the tile count.
+
+   iecdrv_reset_filter is not the same as the inline "&{in | reset}" form used in
+   c1581_multi.sv: the "active" latch means a drive that has never driven the line
+   does not contribute to it at all.
+*/
+
+module iecdrv_reset_filter #(parameter WIDTH = 1) 
+(
+	input              clk,
+	input  [WIDTH-1:0] reset,
+	input  [WIDTH-1:0] in,
+	output             out
+);
+
+reg [WIDTH-1:0] active;
+
+assign out = &{in | reset | ~active};
+
+generate
+	genvar i;
+	for(i=0; i<WIDTH; i=i+1) begin :reset_filter_active
+		always @(posedge clk)
+			if(reset[i] || !active[i])
+				active[i] <= in[i];
+	end
+endgenerate
+
+endmodule
+
+module iecdrv_trackmem #(parameter ADDRWIDTH, parameter WORDS, parameter DATAWIDTH=8)
+(
+	input	                     clock_a,
+	input	     [ADDRWIDTH-1:0] address_a,
+	input	     [DATAWIDTH-1:0] data_a,
+	input	                     wren_a,
+	output reg [DATAWIDTH-1:0] q_a,
+
+	input	                     clock_b,
+	input	     [ADDRWIDTH-1:0] address_b,
+	input	     [DATAWIDTH-1:0] data_b,
+	input	                     wren_b,
+	output reg [DATAWIDTH-1:0] q_b
+);
+
+// The array covers the whole address space rather than just WORDS entries, because
+// callers read past the end of the track and mask the result off afterwards. On a
+// Xilinx BRAM both depths cost the same number of tiles.
+//
+// Same single-edge timing as iecdrv_mem above: the head side writes one byte per
+// bit-cell with a single-cycle buff_we, so its data must not lag its address either.
+reg [DATAWIDTH-1:0] ram[1<<ADDRWIDTH];
+
+always @(posedge clock_a) begin
+	if(wren_a) begin
+		ram[address_a] <= data_a;
+		q_a <= data_a;
+	end else begin
+		q_a <= ram[address_a];
+	end
+end
+
+always @(posedge clock_b) begin
+	if(wren_b) begin
+		ram[address_b] <= data_b;
+		q_b <= data_b;
+	end else begin
+		q_b <= ram[address_b];
+	end
+end
+
+endmodule
