@@ -108,6 +108,10 @@ port(
 	io_rom      : in  std_logic;
 	io_ext      : in  std_logic;
 	io_data     : in  unsigned(7 downto 0);
+
+	-- MEGA65 (CMD SuperCPU): read override inside VIC-II space, see fpga64_buslogic.
+	scpu_oe     : in  std_logic := '0';
+	scpu_data   : in  unsigned(7 downto 0) := (others => '1');
 	irq_n       : in  std_logic;
 	nmi_n       : in  std_logic;
 	nmi_ack     : out std_logic;
@@ -513,6 +517,8 @@ port map (
 	io_rom => io_rom,
 	io_ext => io_ext or sid_sel_r,
 	io_data => io_data_i,
+	scpu_oe => scpu_oe,
+	scpu_data => scpu_data,
 
 	ramData => ramDin,
 

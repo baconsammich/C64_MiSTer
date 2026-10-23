@@ -97,6 +97,18 @@ entity fpga64_buslogic is
 		io_rom      : in std_logic;
 		io_ext      : in std_logic;
 		io_data     : in unsigned(7 downto 0);
+
+		-- MEGA65 (CMD SuperCPU): an accelerator answering inside VIC-II space.
+		-- The SuperCPU puts its registers at $D071-$D07F and $D0B0-$D0BF and its two
+		-- private RAM pages at $D200-$D3FF, all of which a real VIC-II does not decode:
+		-- those are VIC registers $30-$3F, which do not exist, so reads float and writes
+		-- are ignored. That is exactly why CMD chose them, and it means only READS need
+		-- intercepting here -- writes reach the device through the ordinary bus and the
+		-- VIC ignores them as it always did.
+		--
+		-- io_ext cannot carry this: it is gated on cs_ioE/cs_ioF, i.e. $DE00-$DFFF.
+		scpu_oe     : in std_logic := '0';
+		scpu_data   : in unsigned(7 downto 0) := (others => '1');
 		
 		cpuWe       : in std_logic;
 		cpuAddr     : in unsigned(15 downto 0);
@@ -282,13 +294,19 @@ begin
 			  cs_ramLoc, cs_vicLoc, cs_sidLoc, cs_colorLoc,
 			  cs_cia1Loc, cs_cia2Loc, lastVicData,
 			  cs_ioELoc, cs_ioFLoc, cs_UMAXnomapLoc,
-			  io_rom, io_ext, io_data)
+			  io_rom, io_ext, io_data, scpu_oe, scpu_data)
 	begin
 		-- If no hardware is addressed the bus is floating.
 		-- It will contain the last data read by the VIC. (if a C64 is shielded correctly)
 		dataToCpu <= lastVicData;
 		if cs_CharLoc = '1' then	
 			dataToCpu <= unsigned(charData);
+		-- MEGA65 (CMD SuperCPU): after the character ROM and before the VIC. After the
+		-- char ROM because the accelerator answers only while I/O is mapped, so CHAREN=0
+		-- must still win; before the VIC because the addresses are inside its space and
+		-- it would otherwise float $FF over them.
+		elsif scpu_oe = '1' then
+			dataToCpu <= scpu_data;
 		elsif cs_UMAXnomapLoc = '1' then  /* main.vhd is ingesting data from the cartridge instead of "RAM" done by sy2002 on 07/05/25 */
 		   dataToCPU <= ramData;
 		elsif cs_romLoc = '1' then	
