@@ -7,6 +7,11 @@
 // 8520 version by Sorgelig
 // Shift register fixes, merge of 6526 and 8520, and addition of 5710 variant by Erik Scheffers
 
+// MEGA65: the three always blocks below that declare a local reg are NAMED. A declaration
+// inside an unnamed block is SystemVerilog, and Vivado reads a .v file as Verilog-2001, where
+// it is "declarations are not allowed in an unnamed block" and the whole module is dropped.
+// The mos6526.v beside this file carries the same two labels for the same reason.
+
 module mos6526_8520 (
   input  wire [1:0] mode,   // 0 - 6526, 1 - 8521, 2 - 8520, 3 - 5710 (untested)
   input  wire       clk,
@@ -163,7 +168,7 @@ always @(posedge clk) begin
 end
 
 // FLAG Input
-always @(posedge clk) begin
+always @(posedge clk) begin : flag_blk
   reg old_flag, flag;
 
   old_flag <= flag_n;
@@ -530,7 +535,7 @@ always @(posedge clk) begin
 end
 
 // CNT Input/Output
-always @(posedge clk) begin
+always @(posedge clk) begin : cnt_blk
   reg cra6_prev;
   if (!res_n) begin
     cnt_in_r     <= 1'b1;
@@ -557,7 +562,7 @@ end
 wire [4:0] icr_adj = {icr[4:2], timer_b_int, icr[0]};
 
 // Interrupt Control
-always @(posedge clk) begin
+always @(posedge clk) begin : irq_blk
   reg [7:0] imr_reg;
 
   if (!res_n) begin
