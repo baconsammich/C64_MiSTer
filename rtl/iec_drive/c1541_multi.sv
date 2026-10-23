@@ -60,6 +60,13 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input   [7:0] rom_data_i,
 	output  [7:0] rom_data_o,
 	input         rom_wr_i,
+
+	// MEGA65: the stock 1541-II DOS, a third shared 16 KB slot alongside the factory 1541 DOS
+	// and the custom (JiffyDOS) one. Same clk_sys address/data bus, its own write strobe and
+	// its own readback, so iec_drive.sv can decode it out of the ROM slot field without this
+	// module having to know the slot numbering.
+	input         rom_ii_wr_i,
+	output  [7:0] rom_ii_data_o,
 	
 	// clk clock domain
 	// MEGA65: ONE BIT PER DRIVE rather than one for the whole chip, so each drive picks the
@@ -67,7 +74,13 @@ module c1541_multi #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// drives does, you fit the ROM you want in each. This costs no extra memory: the fetch
 	// state machine below already reads one byte per drive in its own slot, and both ROMs
 	// already exist side by side.
-	input   [N:0] rom_std_i
+	input   [N:0] rom_std_i,
+
+	// MEGA65: which MODEL a drive on the factory DOS is. 1 = the stock 1541-II DOS, 0 = the
+	// stock 1541 DOS. Only consulted where rom_std_i is 1: JiffyDOS replaces the DOS outright,
+	// so a drive asking for it gets the custom slot whichever model it is -- which is what a
+	// real JiffyDOS chip in a real 1541-II does.
+	input   [N:0] rom_ii_i
 );
 
 localparam NDR = (DRIVES < 1) ? 1 : (DRIVES > 4) ? 4 : DRIVES;
@@ -86,9 +99,15 @@ wire [N:0] stdrom = (DUALROM || PARPORT) ? rom_std_i : {NDR{1'b1}};
 reg  [14:0] mem_a;
 wire [7:0] rom_do;
 wire [7:0] romstd_do;
+wire [7:0] romii_do;
 wire [7:0] qnice_rom1_do;
 wire [7:0] qnice_rom2_do;
 assign rom_data_o = (DUALROM || PARPORT) ? qnice_rom2_do : qnice_rom1_do;
+
+// MEGA65: 1 = this drive reads the 1541-II slot rather than the factory 1541 one. Gated on
+// rom_std_i so the custom slot always wins; the caller gates rom_ii_i itself on the ROM file
+// having turned up, so an unprovisioned slot can never be selected (see main.vhd).
+wire [N:0] romii_sel = rom_ii_i & stdrom;
 
 reg ph2_r;
 reg ph2_f;
@@ -144,7 +163,11 @@ xpm_cdc_array_single #(
 
 generate
 	if(PARPORT) begin
-		iecdrv_mem #(
+		// MEGA65: iecdrv_mem_rom, not iecdrv_mem -- the latter has neither of the two
+		// parameters below, so this branch did not elaborate at all. Inert in this port
+		// (PARPORT is 0, see the generic map in main.vhd) but it failed the Verilog lint
+		// gate and would have failed synthesis the moment DolphinDOS was switched on.
+		iecdrv_mem_rom #(
 		   .DATAWIDTH(8),
 		   .ADDRWIDTH(15),
 		   .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1541_dolphin.mif.hex"),
@@ -201,6 +224,28 @@ iecdrv_mem_rom #(
 	.q_b(romstd_do)
 );
 
+// MEGA65: the stock 1541-II DOS (251968-03). INITFILEd with the stock 1541 DOS, exactly as the
+// custom slot above is, so a card without c1541ii.rom leaves this holding a working 1541 rather
+// than all-00 -- and main.vhd additionally refuses to select it until a write has landed here.
+// A 1541-II differs from a 1541 in its case, its power supply and this ROM; the logic board is
+// the same 6502 and VIA pair, so there is no RTL delta to go with it.
+iecdrv_mem_rom #(
+   .DATAWIDTH(8),
+   .ADDRWIDTH(14),
+   .INITFILE("../../C64_MiSTerMEGA65/rtl/iec_drive/c1541_rom.mif.hex"),
+   .FALLING_A(1'b1)
+) romii_rom (
+	.clock_a(clk_sys),
+	.address_a(rom_addr_i[13:0]),
+	.data_a(rom_data_i),
+	.wren_a(rom_ii_wr_i),
+	.q_a(rom_ii_data_o),
+
+	.clock_b(clk),
+	.address_b(mem_a[13:0]),
+	.q_b(romii_do)
+);
+
 wire [14:0] drv_addr[NDR];
 reg   [7:0] drv_data[4];
 always @(posedge clk) begin
@@ -215,7 +260,9 @@ always @(posedge clk) begin
 	endcase
 	
 	case(state)
-		3,4,5,6: drv_data[state[1:0] - 2'd3] <= stdrom[state[1:0] - 2'd3] ? romstd_do : rom_do;
+		// MEGA65: three-way now -- custom (JiffyDOS) slot, stock 1541-II, stock 1541.
+		3,4,5,6: drv_data[state[1:0] - 2'd3] <= !stdrom[state[1:0] - 2'd3] ? rom_do    :
+		                                     romii_sel[state[1:0] - 2'd3]  ? romii_do  : romstd_do;
 	endcase
 end
 

@@ -58,9 +58,15 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	output reg [7:0] sd_buff_din[NDR],
 	input         sd_buff_wr,
 
-	input  [15:0] rom_addr_i,
+	// MEGA65: [17:15] is a ROM SLOT number and [14:0] the address within that slot. It began
+	// as a single bit (0 = the 1541 custom DOS, 1 = the 1581 one) and grew into a field when
+	// the drive models stopped sharing one ROM each. The slots are assigned in the QNICE
+	// device decode in mega65.vhd, one C_DEV_C64_* device each:
+	//    0 = 1541 custom DOS (JiffyDOS), 16 KB   2 = stock 1541-II DOS, 16 KB
+	//    1 = 1581 custom DOS (JiffyDOS), 32 KB   3..7 = free
+	input  [17:0] rom_addr_i,
 	input   [7:0] rom_data_i,
-	output  [7:0] rom_data_o,
+	output reg [7:0] rom_data_o,
 	input         rom_wr_i,
 	// MEGA65: one bit per drive, and one vector per ENGINE. 1 = that drive runs the factory
 	// DOS, 0 = the custom (JiffyDOS) one. This was a single bit for the whole chip, wired to
@@ -74,6 +80,11 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// running it out of blank memory.
 	input   [N:0] rom_std_i,
 	input   [N:0] rom_std_1581_i,
+
+	// MEGA65: which MODEL each drive on the factory DOS is. 1 = stock 1541-II, 0 = stock 1541.
+	// Only consulted where rom_std_i is 1 -- JiffyDOS replaces the DOS outright, so it wins on
+	// either model. The 1581 has no second model, hence no twin vector for it.
+	input   [N:0] rom_ii_i,
 
 	// ---------------------------------------------------------------------
 	// MEGA65 physical internal 1581 (issue #90): drive-0 flat toggle/level ABI
@@ -180,15 +191,22 @@ assign iec_clk_o    = c1581_iec_clk  & c1541_iec_clk;
 assign par_stb_o    = c1581_stb_o    & c1541_stb_o;
 assign par_data_o   = c1581_par_o    & c1541_par_o;
 
-// MEGA65 (D81): ROM readback mux. c1541 custom-DOS ROM when rom_addr_i[15]=0, c1581 when
-// =1. The ROM slots are FALLING_A (QNICE writes/reads on the falling edge of clk_sys), so
-// the select bit is captured on the SAME falling edge to stay aligned with the q_a read
-// data. (Readback only -- the auto-loader never reads ROMs back; this is forward-proofing
-// for any future verify-after-write of the 1581 JiffyDOS image.)
-wire [7:0] c1541_rom_data_o, c1581_rom_data_o;
-reg        rom_sel_d;
-always @(negedge clk_sys) rom_sel_d <= rom_addr_i[15];
-assign rom_data_o = rom_sel_d ? c1581_rom_data_o : c1541_rom_data_o;
+// MEGA65 (D81): ROM readback mux, one arm per slot of rom_addr_i[17:15]. The ROM slots are
+// FALLING_A (QNICE writes/reads on the falling edge of clk_sys), so the slot number is
+// captured on the SAME falling edge to stay aligned with the q_a read data. (Readback only --
+// the auto-loader never reads ROMs back; this is forward-proofing for any future
+// verify-after-write of a streamed drive DOS image.)
+wire [2:0] rom_slot = rom_addr_i[17:15];
+wire [7:0] c1541_rom_data_o, c1581_rom_data_o, c1541ii_rom_data_o;
+reg  [2:0] rom_sel_d;
+always @(negedge clk_sys) rom_sel_d <= rom_slot;
+always_comb begin
+	case(rom_sel_d)
+		3'd1:    rom_data_o = c1581_rom_data_o;
+		3'd2:    rom_data_o = c1541ii_rom_data_o;
+		default: rom_data_o = c1541_rom_data_o;
+	endcase
+end
 
 always_comb for(int i=0; i<NDR; i=i+1) begin
 	sd_buff_din[i] = (dtype[1][i] ? c1581_sd_buff_dout[i] : c1541_sd_buff_dout[i] );
@@ -230,8 +248,11 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 	.rom_addr_i(rom_addr_i[14:0]),
 	.rom_data_i(rom_data_i),
 	.rom_data_o(c1541_rom_data_o),
-	.rom_wr_i(~rom_addr_i[15] & rom_wr_i),
+	.rom_wr_i(rom_wr_i & (rom_slot == 3'd0)),
+	.rom_ii_wr_i(rom_wr_i & (rom_slot == 3'd2)),
+	.rom_ii_data_o(c1541ii_rom_data_o),
 	.rom_std_i(rom_std_i),
+	.rom_ii_i(rom_ii_i),
 
 	.img_mounted(img_mounted),
 	.img_size(img_size),
@@ -254,7 +275,7 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 // one engine drives the IEC bus at a time (AND-wired, safe by construction -- a reset drive
 // contributes '1').
 // The stale signal names in the original commented block (rom_addr/rom_data/rom_wr/rom_std)
-// are corrected to the actual _i-suffixed ports; bit15 of rom_addr_i selects the 1581 ROM
+// are corrected to the actual _i-suffixed ports; slot 1 of rom_addr_i[17:15] is the 1581 ROM
 // window. iec_fclk_o and pwr_led are intentionally left unconnected (C64 has no fast serial).
 c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 (
@@ -285,7 +306,7 @@ c1581_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1581
 	.rom_addr(rom_addr_i[14:0]),
 	.rom_data(rom_data_i),
 	.rom_data_o(c1581_rom_data_o),
-	.rom_wr(rom_addr_i[15] & rom_wr_i),
+	.rom_wr(rom_wr_i & (rom_slot == 3'd1)),
 	.rom_std(rom_std_1581_i),
 
 	.img_mounted(img_mounted),
