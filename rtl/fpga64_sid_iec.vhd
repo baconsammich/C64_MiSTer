@@ -966,7 +966,22 @@ busCyc_816 <= (vda_816 or vpa_816) when bank_816 = x"00" else '0';
 cpuAddr_pre <= cpuAddr_6510 when scpu_enable = '0' else
                cpuAddr_816  when busCyc_816 = '1'  else x"0100";
 cpuDo_pre   <= cpuDo_6510   when scpu_enable = '0' else cpuDo_816;
-cpuWe_pre   <= cpuWe_6510   when scpu_enable = '0' else (cpuWe_816 and busCyc_816);
+-- AND baLoc, which is the one place this cannot simply mirror the 6510. A 6502
+-- halts on a read when RDY goes low but COMPLETES a write, which is why
+-- phi0_cpu above forces cpuHasBus whenever cpuWe is high. The 65C816 core does
+-- not work that way: RDY_IN gates its whole enable, so when the VIC takes the
+-- bus the core freezes with every output held, cpuWe among them -- and that
+-- forced cpuHasBus then commits the same write on all 43 stolen cycles. For RAM
+-- it is idempotent and invisible. For anything that COUNTS writes -- the
+-- RAMLink SDRAM path, vdrives, the CMD HD, the REU, any FIFO or strobe -- one
+-- store becomes forty-four.
+--
+-- Gating on baLoc is not dropping the write. The core has not advanced, so the
+-- write has not happened yet; it is re-presented and committed on the cycle
+-- after the VIC gives the bus back. It also stops this CPU taking cycles back
+-- off the VIC, which the 6510 accommodation only exists to allow.
+cpuWe_pre   <= cpuWe_6510   when scpu_enable = '0' else
+               (cpuWe_816 and busCyc_816 and baLoc);
 cpuIO       <= cpuIO_6510   when scpu_enable = '0' else cpuIO_816;
 nmi_ack     <= nmiAck_6510  when scpu_enable = '0' else nmiAck_816;
 scpu_bank   <= bank_816;
