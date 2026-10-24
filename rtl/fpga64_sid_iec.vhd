@@ -112,6 +112,17 @@ port(
 	-- MEGA65 (CMD SuperCPU): read override inside VIC-II space, see fpga64_buslogic.
 	scpu_oe     : in  std_logic := '0';
 	scpu_data   : in  unsigned(7 downto 0) := (others => '1');
+	-- I/O is BANKED IN, i.e. the PLA maps the chips into $D000-$DFFF rather than
+	-- RAM or the character ROM. The accelerator's registers live inside that
+	-- space and must decode only while it exists: with LORAM and HIRAM both low
+	-- the whole range is plain RAM, and a program walking it must not trip
+	-- $D0Bx. The SuperCPU boot ROM march-tests exactly that range.
+	--
+	-- This is the MAP condition and deliberately not cs_vic, which is
+	-- "cs_vicLoc and io_enable" -- a one-shot per sysCycle marking the I/O
+	-- CYCLE. supercpu.vhd is timed off phi2, so gating it with that pulse
+	-- misses the window entirely and the register file stops answering.
+	scpu_io_o   : out std_logic;
 
 	-- MEGA65 (CMD SuperCPU): run the 65C816 instead of the 6510. Both are
 	-- instantiated and one is clock-enabled, so with scpu_enable low the 6510
@@ -121,6 +132,18 @@ port(
 	scpu_enable : in  std_logic := '0';
 	scpu_emul   : out std_logic;         -- 1 = emulation mode, 0 = native
 	scpu_bank   : out unsigned(7 downto 0);
+
+	-- MEGA65 (CMD SuperCPU): the accelerator's own memory, which lives in
+	-- main.vhd. scpu_mem_addr_o is presented combinationally so that a block RAM
+	-- read is registered and ready by the time enableCpu arrives; the two _q
+	-- inputs come back a cycle later and are selected by the two _hit outputs.
+	scpu_shadow_on : in  std_logic := '0';  -- the OS has been copied into bank $01
+	scpu_bootmap   : in  std_logic := '1';  -- bank $00 reads answer from ROM
+	scpu_mem_addr  : out unsigned(15 downto 0);
+	scpu_mem_dout  : out unsigned(7 downto 0);
+	scpu_shadow_we : out std_logic;
+	scpu_rom_q     : in  unsigned(7 downto 0) := (others => '1');
+	scpu_shadow_q  : in  unsigned(7 downto 0) := (others => '1');
 	irq_n       : in  std_logic;
 	nmi_n       : in  std_logic;
 	nmi_ack     : out std_logic;
@@ -270,6 +293,13 @@ signal cpuDo_816    : unsigned(7 downto 0);
 signal cpuIO_816    : unsigned(7 downto 0);
 signal nmiAck_816   : std_logic;
 signal bank_816     : unsigned(7 downto 0);
+signal scpu_rom_hit    : std_logic;
+signal scpu_shadow_hit : std_logic;
+signal scpu_mem_hit    : std_logic;
+signal scpu_io_win     : std_logic;
+signal scpu_basic_sel  : std_logic;
+signal scpu_kernal_sel : std_logic;
+signal scpu_di         : unsigned(7 downto 0);
 signal vda_816      : std_logic;
 signal vpa_816      : std_logic;
 signal busCyc_816   : std_logic;
@@ -935,7 +965,7 @@ port map (
 	irq_n => irq_cia1 and irq_vic and irq_n and irq_ext_n,
 	rdy => baLoc,
 
-	di => cpuDi,
+	di => scpu_di,
 	addr => cpuAddr_816,
 	do => cpuDo_816,
 	we => cpuWe_816,
@@ -963,8 +993,64 @@ port map (
 -- is what unpopulated memory does. Reads outside bank 0 alias into bank 0.
 busCyc_816 <= (vda_816 or vpa_816) when bank_816 = x"00" else '0';
 
+-- -----------------------------------------------------------------------
+-- MEGA65 (CMD SuperCPU): where a 65C816 access is actually answered.
+--
+-- Banks $00 and $01 are the accelerator's static RAM on the real board and
+-- $F8/$F9 are its system ROM. Bank $00 is not duplicated here: the C64's own
+-- RAM is already single-cycle block RAM, so bank $00 simply is that RAM and
+-- the VIC sees every write without any mirroring. Bank $01 is the OS shadow
+-- and bank $F8 is the ROM, both in main.vhd.
+--
+-- Three rules, in order:
+--   * bank $F8 reads come from the ROM.
+--   * bank $01 is the shadow, read and written.
+--   * bank $00 reads come from the ROM while bootmap is set -- which is how the
+--     reset vector at $00:FFFC can be fetched before anything has been copied
+--     anywhere -- and afterwards, once the shadow holds the operating system,
+--     a read of the address range the PLA maps BASIC or KERNAL into is answered
+--     from the shadow instead of from the C64's own ROM. That is the
+--     "multi-layered KERNAL" the CMD manual warns about, and it is why copying
+--     the KERNAL to RAM and running it there fails on a real SuperCPU.
+-- Everything else is the ordinary C64 bus.
+-- I/O ALWAYS GOES OUT TO THE BUS. Neither bootmap nor the shadow may cover
+-- $D000-$DFFF while the chips are banked in: the accelerator's own registers
+-- live there, and so do the VIC and the CIAs. Without this the boot ROM's very
+-- first decision -- BIT $D0B0 / BVS, which asks whether this is a 64 or a 128 --
+-- reads ROM instead of the register, takes the 128 branch, sets $01 to $E3 and
+-- never recovers. CMD put it plainly: "Mirroring of I/O is always performed
+-- when I/O is mapped in."
+scpu_io_win     <= '1' when cpuAddr_816(15 downto 12) = x"D" and
+                            cpuIO(2) = '1' and (cpuIO(0) = '1' or cpuIO(1) = '1') else '0';
+scpu_basic_sel  <= '1' when cpuAddr_816(15 downto 13) = "101" and cpuIO(0) = '1' and cpuIO(1) = '1' else '0';
+scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1' else '0';
+
+-- Every one of these is gated on scpu_shadow_on, which main.vhd drives from
+-- "QNICE has actually streamed a SuperCPU ROM in". Without one there is nothing
+-- at bank $F8 and nothing in the shadow, and bootmap would otherwise point the
+-- processor at an empty block RAM from its very first fetch. With no ROM the
+-- accelerator runs the stock C64 map, which is the mode that works today.
+scpu_rom_hit    <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
+                            (bank_816 = x"F8" or
+                             (bank_816 = x"00" and scpu_bootmap = '1' and cpuWe_816 = '0' and
+                              scpu_io_win = '0')) else '0';
+scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
+                            (bank_816 = x"01" or
+                             (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
+                              cpuWe_816 = '0' and scpu_io_win = '0' and
+                              (scpu_basic_sel or scpu_kernal_sel) = '1')) else '0';
+scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
+
+scpu_mem_addr   <= cpuAddr_816;
+scpu_mem_dout   <= cpuDo_816;
+-- Only bank $01 is writable. A write to the ROM is dropped, and a write to
+-- bank $00 goes out to the C64 bus like any other.
+scpu_shadow_we  <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and bank_816 = x"01" and
+                            cpuWe_816 = '1' and (vda_816 or vpa_816) = '1' and
+                            baLoc = '1' and enableCpu = '1' else '0';
+
 cpuAddr_pre <= cpuAddr_6510 when scpu_enable = '0' else
-               cpuAddr_816  when busCyc_816 = '1'  else x"0100";
+               cpuAddr_816  when (busCyc_816 and not scpu_mem_hit) = '1' else x"0100";
 cpuDo_pre   <= cpuDo_6510   when scpu_enable = '0' else cpuDo_816;
 -- AND baLoc, which is the one place this cannot simply mirror the 6510. A 6502
 -- halts on a read when RDY goes low but COMPLETES a write, which is why
@@ -981,10 +1067,16 @@ cpuDo_pre   <= cpuDo_6510   when scpu_enable = '0' else cpuDo_816;
 -- after the VIC gives the bus back. It also stops this CPU taking cycles back
 -- off the VIC, which the 6510 accommodation only exists to allow.
 cpuWe_pre   <= cpuWe_6510   when scpu_enable = '0' else
-               (cpuWe_816 and busCyc_816 and baLoc);
+               (cpuWe_816 and busCyc_816 and baLoc and not scpu_mem_hit);
 cpuIO       <= cpuIO_6510   when scpu_enable = '0' else cpuIO_816;
 nmi_ack     <= nmiAck_6510  when scpu_enable = '0' else nmiAck_816;
 scpu_bank   <= bank_816;
+scpu_io_o   <= '1' when cpuIO(2) = '1' and (cpuIO(0) = '1' or cpuIO(1) = '1') else '0';
+
+-- What the 65C816 reads: its own ROM, its own shadow, or the C64 bus.
+scpu_di     <= scpu_rom_q    when scpu_rom_hit = '1'    else
+               scpu_shadow_q when scpu_shadow_hit = '1' else
+               cpuDi;
 
 cass_motor <= cpuIO(5);
 cass_write <= cpuIO(3);
