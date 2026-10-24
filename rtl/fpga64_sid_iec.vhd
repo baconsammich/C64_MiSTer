@@ -112,6 +112,15 @@ port(
 	-- MEGA65 (CMD SuperCPU): read override inside VIC-II space, see fpga64_buslogic.
 	scpu_oe     : in  std_logic := '0';
 	scpu_data   : in  unsigned(7 downto 0) := (others => '1');
+
+	-- MEGA65 (CMD SuperCPU): run the 65C816 instead of the 6510. Both are
+	-- instantiated and one is clock-enabled, so with scpu_enable low the 6510
+	-- path is bit for bit what it was. The switch is only ever thrown while the
+	-- core is in reset (the menu item forces one), so no CPU is ever swapped out
+	-- from under running code.
+	scpu_enable : in  std_logic := '0';
+	scpu_emul   : out std_logic;         -- 1 = emulation mode, 0 = native
+	scpu_bank   : out unsigned(7 downto 0);
 	irq_n       : in  std_logic;
 	nmi_n       : in  std_logic;
 	nmi_ack     : out std_logic;
@@ -247,6 +256,23 @@ signal cs_ram       : std_logic;
 signal cs_turbo_eligible : std_logic; -- C64MEGA65: narrower companion of cs_ram for the turbo cycles of cpu_cyc;
 signal cpuWe        : std_logic;
 signal cpuWe_pre    : std_logic;
+
+-- MEGA65 (CMD SuperCPU): the second processor and the nets that select between
+-- the two. *_6510 are the 6510 outputs, *_816 the 65C816 ones.
+signal cpuWe_6510   : std_logic;
+signal cpuAddr_6510 : unsigned(15 downto 0);
+signal cpuDo_6510   : unsigned(7 downto 0);
+signal cpuIO_6510   : unsigned(7 downto 0);
+signal nmiAck_6510  : std_logic;
+signal cpuWe_816    : std_logic;
+signal cpuAddr_816  : unsigned(15 downto 0);
+signal cpuDo_816    : unsigned(7 downto 0);
+signal cpuIO_816    : unsigned(7 downto 0);
+signal nmiAck_816   : std_logic;
+signal bank_816     : unsigned(7 downto 0);
+signal vda_816      : std_logic;
+signal vpa_816      : std_logic;
+signal busCyc_816   : std_logic;
 signal cpuAddr      : unsigned(15 downto 0);
 signal cpuAddr_pre  : unsigned(15 downto 0);
 signal cpuDi        : unsigned(7 downto 0);
@@ -871,20 +897,79 @@ cpu: entity work.cpu_6510
 port map (
 	clk => clk32,
 	reset => reset,
-	enable => enableCpu and not dma_active,
+	enable => enableCpu and not dma_active and not scpu_enable,
 	nmi_n => irq_cia2 and nmi_n,
-	nmi_ack => nmi_ack,
+	nmi_ack => nmiAck_6510,
 	irq_n => irq_cia1 and irq_vic and irq_n and irq_ext_n,
 	rdy => baLoc,
 
 	di => cpuDi,
-	addr => cpuAddr_pre,
-	do => cpuDo_pre,
-	we => cpuWe_pre,
+	addr => cpuAddr_6510,
+	do => cpuDo_6510,
+	we => cpuWe_6510,
 
 	diIO => cpuIO(7) & cpuIO(6) & cpuIO(5) & cass_sense & cpuIO(3) & "111",
-	doIO => cpuIO
+	doIO => cpuIO_6510
 );
+
+-- -----------------------------------------------------------------------
+-- MEGA65 (CMD SuperCPU): the 65C816, in CORE/vhdl/cpu_65c816.vhd
+--
+-- It is given the 6510 wrapper port list so that this is a selection and not a
+-- rebuild. Whichever CPU is not selected gets no clock enable and so is frozen
+-- mid-cycle rather than running code nobody reads.
+--
+-- The 6510 outputs cpuIO, whose low three bits ARE the PLA bankSwitch input, so
+-- cpuIO has to follow the selection too. Leaving it on the frozen 6510 would
+-- have pinned LORAM/HIRAM/CHAREN to whatever that chip last drove, and the
+-- symptom -- a machine that half boots because the KERNAL cannot map itself in
+-- -- would have looked like a broken CPU rather than a missing mux.
+-- -----------------------------------------------------------------------
+scpu: entity work.cpu_65c816
+port map (
+	clk => clk32,
+	reset => reset,
+	enable => enableCpu and not dma_active and scpu_enable,
+	nmi_n => irq_cia2 and nmi_n,
+	nmi_ack => nmiAck_816,
+	irq_n => irq_cia1 and irq_vic and irq_n and irq_ext_n,
+	rdy => baLoc,
+
+	di => cpuDi,
+	addr => cpuAddr_816,
+	do => cpuDo_816,
+	we => cpuWe_816,
+
+	diIO => cpuIO(7) & cpuIO(6) & cpuIO(5) & cass_sense & cpuIO(3) & "111",
+	doIO => cpuIO_816,
+
+	bank_o => bank_816,
+	emul_o => scpu_emul,
+	vda_o => vda_816,
+	vpa_o => vpa_816
+);
+
+-- A 65C816 cycle only means something on the bus when it says so. VDA and VPA
+-- are both low during the processor's internal cycles, when the address bus
+-- carries whatever was left on it -- and those cycles are READS, because the
+-- core drives WE low only while OUT_BUS is non-zero. A stray read is not
+-- harmless on a C64: $DC0D and $DD0D clear the CIA interrupt flags when read,
+-- so one landing there eats an interrupt and the machine hangs somewhere
+-- unrelated. Internal cycles are therefore pointed at $0100, which is RAM in
+-- every memory configuration and has no side effect.
+--
+-- Bank 0 only, as well. There is no SuperRAM yet, so nothing above bank 0
+-- exists; a write there is dropped rather than folded back into bank 0, which
+-- is what unpopulated memory does. Reads outside bank 0 alias into bank 0.
+busCyc_816 <= (vda_816 or vpa_816) when bank_816 = x"00" else '0';
+
+cpuAddr_pre <= cpuAddr_6510 when scpu_enable = '0' else
+               cpuAddr_816  when busCyc_816 = '1'  else x"0100";
+cpuDo_pre   <= cpuDo_6510   when scpu_enable = '0' else cpuDo_816;
+cpuWe_pre   <= cpuWe_6510   when scpu_enable = '0' else (cpuWe_816 and busCyc_816);
+cpuIO       <= cpuIO_6510   when scpu_enable = '0' else cpuIO_816;
+nmi_ack     <= nmiAck_6510  when scpu_enable = '0' else nmiAck_816;
+scpu_bank   <= bank_816;
 
 cass_motor <= cpuIO(5);
 cass_write <= cpuIO(3);
