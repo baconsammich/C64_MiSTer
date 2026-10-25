@@ -145,6 +145,12 @@ port(
 	scpu_shadow_on : in  std_logic := '0';  -- the OS has been copied into bank $01
 	scpu_bootmap   : in  std_logic := '1';  -- bank $00 reads answer from ROM
 	scpu_hwenable  : in  std_logic := '0';  -- register bank open: moves the KERNAL shadow
+	-- The rest of the second clause of the interrupt reroute condition; see the
+	-- scpu_vec_reroute formula below. hwenable is already above and emulation mode
+	-- comes from the processor itself.
+	scpu_sys1mhz   : in  std_logic := '0';  -- the system 1 MHz flag, $D072/$D073
+	scpu_dosext    : in  std_logic := '0';  -- RL-DOS shadowing is on
+	scpu_ramlink   : in  std_logic := '0';  -- a RAMLink is present
 	scpu_mem_addr  : out unsigned(15 downto 0);
 	scpu_mem_dout  : out unsigned(7 downto 0);
 	scpu_shadow_we : out std_logic;
@@ -308,6 +314,8 @@ signal scpu_kshadow_lo : std_logic;
 signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_di         : unsigned(7 downto 0);
+signal scpu_vec_reroute : std_logic;
+signal emul_816        : std_logic;
 signal vpb_816         : std_logic;
 signal vda_816      : std_logic;
 signal vpa_816      : std_logic;
@@ -983,7 +991,7 @@ port map (
 	doIO => cpuIO_816,
 
 	bank_o => bank_816,
-	emul_o => scpu_emul,
+	emul_o => emul_816,
 	vda_o => vda_816,
 	vpa_o => vpa_816,
 	vpb_o => vpb_816
@@ -1076,14 +1084,48 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 -- at bank $F8 and nothing in the shadow, and bootmap would otherwise point the
 -- processor at an empty block RAM from its very first fetch. With no ROM the
 -- accelerator runs the stock C64 map, which is the mode that works today.
+-- THE INTERRUPT VECTOR REROUTE. A SuperCPU does not always take its interrupt
+-- vectors from page $FF of bank $00: under the conditions below it reads them
+-- from bank $F8 instead, so $FFFE becomes $F8:FFFE. In ROM 2.04 that holds
+-- $FC94, which is a JML to $00:FBE1, and that lands in the Enhanced Interrupt
+-- Redirection Jump Table at $01:FC80-$FCAF. Without this the processor takes
+-- the stock KERNAL vector and the redirection table is never reached.
+--
+-- VICE computes it in scpu64mem.c:1741, and the two clauses are independent:
+--
+--   (_mem_read_tab_ptr[0xff] == scpu64_kernalshadow_read ||
+--    _mem_read_tab_ptr[0xff] == ram1_read)
+--   && (!scpu64_emulation_mode || mem_reg_hwenable || mem_reg_sys_1mhz ||
+--       mem_reg_dosext || mem_reg_ramlink)
+--
+-- The first clause asks where a read of page $FF would have gone, which here is
+-- the same question as whether the shadow serves $E000-$FFFF: bootmap off and
+-- the KERNAL selected. The second is a plain OR of five flags, four of them
+-- registers in supercpu.vhd and the fifth the presence of a RAMLink.
+--
+-- Note what the second clause means in practice. In emulation mode with no
+-- RAMLink and nothing else set it is false, so a bare SuperCPU keeps the stock
+-- vectors -- which is why the boot handover works without any of this. Plug a
+-- RAMLink in and mem_reg_ramlink is permanently 1, so the reroute is always on
+-- and every interrupt the machine takes goes somewhere we were not sending it.
+scpu_vec_reroute <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and
+                             (vda_816 or vpa_816) = '1' and vpb_816 = '0' and
+                             bank_816 = x"00" and cpuWe_816 = '0' and
+                             scpu_bootmap = '0' and scpu_kernal_sel = '1' and
+                             (emul_816 = '0' or scpu_hwenable = '1' or
+                              scpu_sys1mhz = '1' or scpu_dosext = '1' or
+                              scpu_ramlink = '1') else '0';
+
 scpu_rom_hit    <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"F8" or
                              (bank_816 = x"00" and scpu_bootmap = '1' and cpuWe_816 = '0' and
-                              scpu_boot_win = '1' and scpu_io_win = '0')) else '0';
+                              scpu_boot_win = '1' and scpu_io_win = '0') or
+                             scpu_vec_reroute = '1') else '0';
 scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"01" or
                              (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
                               cpuWe_816 = '0' and scpu_io_win = '0' and
+                              scpu_vec_reroute = '0' and
                               (scpu_basic_sel or scpu_kernal_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
@@ -1109,8 +1151,11 @@ scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 -- With the shadow always at $E000 the first two pass and the third cannot, so
 -- the copy was provably correct -- a byte-for-byte check of all three windows
 -- in the bench found nothing wrong with it -- and the readback was not.
+-- A rerouted vector pull is a read of ROM $F8:FFFE at its own address, so the
+-- hwenable offset must not be applied to it even though hwenable is one of the
+-- five flags that can turn the reroute on in the first place.
 scpu_kshadow_lo <= '1' when bank_816 = x"00" and scpu_kernal_sel = '1' and
-                            scpu_hwenable = '1' else '0';
+                            scpu_hwenable = '1' and scpu_vec_reroute = '0' else '0';
 
 scpu_mem_addr   <= '0' & cpuAddr_816(14 downto 0) when scpu_kshadow_lo = '1' else
                    cpuAddr_816;
@@ -1144,6 +1189,7 @@ cpuIO       <= cpuIO_6510   when scpu_enable = '0' else cpuIO_816;
 nmi_ack     <= nmiAck_6510  when scpu_enable = '0' else nmiAck_816;
 scpu_bank   <= bank_816;
 scpu_vpb    <= vpb_816;
+scpu_emul   <= emul_816;
 scpu_io_o   <= '1' when cpuIO(2) = '1' and (cpuIO(0) = '1' or cpuIO(1) = '1') else '0';
 
 -- What the 65C816 reads: its own ROM, its own shadow, or the C64 bus.
