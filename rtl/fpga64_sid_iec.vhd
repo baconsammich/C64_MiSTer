@@ -142,6 +142,12 @@ port(
 	-- tells apart "the CIA never asked" from "the CIA asked and the processor
 	-- ignored it".
 	cia1_irq_n_o : out std_logic := '1';
+	-- The last bytes written to VIC registers $11 and $20, for the SuperCPU
+	-- diagnostic. The resident driver blanks the display and blacks the border --
+	-- $D011 := $0B, $D020 := $00 -- at $1406 and again at $14B0 immediately
+	-- before it hands over, and the C64 KERNAL puts them back to $1B and $0E in
+	-- CINT. So these two say whether CINT ever ran.
+	vic_diag_o  : out unsigned(15 downto 0) := (others => '0');
 	scpu_bank   : out unsigned(7 downto 0);
 
 	-- MEGA65 (CMD SuperCPU): the accelerator's own memory, which lives in
@@ -322,6 +328,8 @@ signal scpu_kernal_sel : std_logic;
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
+signal vic_d011_q      : unsigned(7 downto 0) := (others => '0');
+signal vic_d020_q      : unsigned(7 downto 0) := (others => '0');
 signal emul_816        : std_logic;
 signal vpb_816         : std_logic;
 signal vda_816      : std_logic;
@@ -675,6 +683,32 @@ begin
 		end if;
 	end if;
 end process;
+
+-- WHETHER THE C64 KERNAL EVER GOT ITS SCREEN BACK.
+-- Same shape as the vicBus capture above, but latched rather than per-cycle, and
+-- taken on pulseWr_io so one store counts once. $11 is the control register whose
+-- bit 4 enables the display and $20 is the border colour; the SuperCPU resident
+-- driver leaves them at $0B and $00, and CINT is what writes $1B and $0E. A black
+-- screen with these still at the driver values means the handover finished and the
+-- KERNAL did not; $1B and $0E with a black screen means the opposite, and the
+-- fault is in the video path or the colours.
+process(clk32)
+begin
+	if rising_edge(clk32) then
+		if reset = '1' then
+			vic_d011_q <= (others => '0');
+			vic_d020_q <= (others => '0');
+		elsif cs_vic = '1' and pulseWr_io = '1' then
+			case cpuAddr(5 downto 0) is
+			when "010001" => vic_d011_q <= cpuDo;
+			when "100000" => vic_d020_q <= cpuDo;
+			when others => null;
+			end case;
+		end if;
+	end if;
+end process;
+
+vic_diag_o <= vic_d011_q & vic_d020_q;
 
 -- In the first three cycles after BA went low, the VIC reads
 -- $ff as character pointers and
