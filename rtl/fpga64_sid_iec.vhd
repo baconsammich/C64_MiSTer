@@ -131,6 +131,11 @@ port(
 	-- from under running code.
 	scpu_enable : in  std_logic := '0';
 	scpu_emul   : out std_logic;         -- 1 = emulation mode, 0 = native
+	-- VECTOR PULL, active low, for two cycles of every interrupt vector read and for
+	-- nothing else. main.vhd counts it: on hardware this is the only way to tell
+	-- whether the accelerator is taking interrupts at all, which is the difference
+	-- between a handover that never starts and one that starts and does not finish.
+	scpu_vpb    : out std_logic := '1';
 	scpu_bank   : out unsigned(7 downto 0);
 
 	-- MEGA65 (CMD SuperCPU): the accelerator's own memory, which lives in
@@ -303,6 +308,7 @@ signal scpu_kshadow_lo : std_logic;
 signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_di         : unsigned(7 downto 0);
+signal vpb_816         : std_logic;
 signal vda_816      : std_logic;
 signal vpa_816      : std_logic;
 signal busCyc_816   : std_logic;
@@ -979,7 +985,8 @@ port map (
 	bank_o => bank_816,
 	emul_o => scpu_emul,
 	vda_o => vda_816,
-	vpa_o => vpa_816
+	vpa_o => vpa_816,
+	vpb_o => vpb_816
 );
 
 -- A 65C816 cycle only means something on the bus when it says so. VDA and VPA
@@ -1136,6 +1143,7 @@ cpuWe_pre   <= cpuWe_6510   when scpu_enable = '0' else
 cpuIO       <= cpuIO_6510   when scpu_enable = '0' else cpuIO_816;
 nmi_ack     <= nmiAck_6510  when scpu_enable = '0' else nmiAck_816;
 scpu_bank   <= bank_816;
+scpu_vpb    <= vpb_816;
 scpu_io_o   <= '1' when cpuIO(2) = '1' and (cpuIO(0) = '1' or cpuIO(1) = '1') else '0';
 
 -- What the 65C816 reads: its own ROM, its own shadow, or the C64 bus.
