@@ -139,6 +139,7 @@ port(
 	-- inputs come back a cycle later and are selected by the two _hit outputs.
 	scpu_shadow_on : in  std_logic := '0';  -- the OS has been copied into bank $01
 	scpu_bootmap   : in  std_logic := '1';  -- bank $00 reads answer from ROM
+	scpu_hwenable  : in  std_logic := '0';  -- register bank open: moves the KERNAL shadow
 	scpu_mem_addr  : out unsigned(15 downto 0);
 	scpu_mem_dout  : out unsigned(7 downto 0);
 	scpu_shadow_we : out std_logic;
@@ -297,6 +298,8 @@ signal scpu_rom_hit    : std_logic;
 signal scpu_shadow_hit : std_logic;
 signal scpu_mem_hit    : std_logic;
 signal scpu_io_win     : std_logic;
+signal scpu_boot_win   : std_logic;
+signal scpu_kshadow_lo : std_logic;
 signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_di         : unsigned(7 downto 0);
@@ -1022,6 +1025,42 @@ busCyc_816 <= (vda_816 or vpa_816) when bank_816 = x"00" else '0';
 -- when I/O is mapped in."
 scpu_io_win     <= '1' when cpuAddr_816(15 downto 12) = x"D" and
                             cpuIO(2) = '1' and (cpuIO(0) = '1' or cpuIO(1) = '1') else '0';
+
+-- WHAT BOOTMAP ACTUALLY COVERS: $8000-$CFFF and $E000-$FFFF, and nothing below
+-- $8000. Not the whole of bank $00, which is what this used to say.
+--
+-- VICE builds the map as a table per 4 kB area against the PLA configuration
+-- byte, and bit 7 of that byte is bootmap (scpu64meminit.c, with
+-- mem_pla_config_changed in scpu64mem.c assembling the index). Reading the
+-- table out for one configuration, with bootmap clear and set:
+--
+--      0000-0fff   RAM            RAM
+--      1000-5fff   RAM            RAM
+--      6000-7fff   RAM            RAM
+--      8000-9fff   ROML           $F8
+--      a000-bfff   ROMH           $F8
+--      c000-cfff   RAM            $F8
+--      d000-d7ff   I/O            I/O
+--      d800-dbff   colour RAM     colour RAM
+--      dc00-dfff   I/O            I/O
+--      e000-ffff   kernal shadow  $F8
+--
+-- So bootmap leaves the bottom 32 kB alone, and THE STACK IS IN THE BOTTOM
+-- 32 kB. Covering all of bank $00 broke the boot ROM in a way that took a long
+-- time to find, because writes still went to RAM: the ROM pushes a return
+-- address at $01FE/$01FF when it calls its checksum at $0176, the two writes
+-- land in RAM correctly, and 1.1 million cycles later the RTS reads the same
+-- two addresses out of the EPROM instead and gets $05/$70 -- the bytes that
+-- happen to sit at $F8:01FE. $0570 is not even an instruction boundary; it is
+-- the middle of STA $D0B2, so the processor ran its operand bytes as a BNE,
+-- fell into the RTL after it, pulled three more EPROM bytes and left for bank
+-- $8D, where it executed $AA as TAX until the run ended. Nothing looked wrong
+-- until the very last step, and every self-test passed on the way.
+--
+-- The $D000-$DFFF hole is unconditional in the table -- with CHAREN clear that
+-- area is the character ROM, never the EPROM -- so scpu_io_win above only has
+-- to decide between I/O and the C64 bus, not whether bootmap applies.
+scpu_boot_win   <= '1' when cpuAddr_816(15) = '1' and cpuAddr_816(15 downto 12) /= x"D" else '0';
 scpu_basic_sel  <= '1' when cpuAddr_816(15 downto 13) = "101" and cpuIO(0) = '1' and cpuIO(1) = '1' else '0';
 scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1' else '0';
 
@@ -1033,7 +1072,7 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 scpu_rom_hit    <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"F8" or
                              (bank_816 = x"00" and scpu_bootmap = '1' and cpuWe_816 = '0' and
-                              scpu_io_win = '0')) else '0';
+                              scpu_boot_win = '1' and scpu_io_win = '0')) else '0';
 scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"01" or
                              (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
@@ -1041,7 +1080,33 @@ scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                               (scpu_basic_sel or scpu_kernal_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
-scpu_mem_addr   <= cpuAddr_816;
+-- WHERE THE KERNAL SHADOW LIVES, which depends on whether the register bank is
+-- open. VICE has two different mappings for a bank $00 read of $E000-$FFFF and
+-- picks between them on hwenable (scpu64meminit.c, entries KT and KS):
+--
+--   hwenable = 0   KT   ram1_read(addr)              = bank $01 offset $E000
+--   hwenable = 1   KS   mem_sram[0x8000 + addr]      = bank $01 offset $6000
+--
+-- $8000 + $E000 is $16000, and bank $01 starts at $10000, so the second one
+-- lands at $6000 -- which is exactly where the third block move at $01F8 puts
+-- ROM $8000-$9FFF. Only the low 15 bits change, so clearing bit 15 is the whole
+-- transformation.
+--
+-- The boot ROM tests all three mappings in a row at $0390 and reports
+-- INITIALIZATION ERROR 06 if any disagrees with the ROM it copied from:
+--
+--   $03B7  hwenable 0, $00:A000 against $F8:A000   -> shadow $A000, move 1
+--   $03C3  hwenable 0, $00:E000 against $F8:E000   -> shadow $E000, move 2
+--   $03DF  hwenable 1, $00:E000 against $F8:8000   -> shadow $6000, move 3
+--
+-- With the shadow always at $E000 the first two pass and the third cannot, so
+-- the copy was provably correct -- a byte-for-byte check of all three windows
+-- in the bench found nothing wrong with it -- and the readback was not.
+scpu_kshadow_lo <= '1' when bank_816 = x"00" and scpu_kernal_sel = '1' and
+                            scpu_hwenable = '1' else '0';
+
+scpu_mem_addr   <= '0' & cpuAddr_816(14 downto 0) when scpu_kshadow_lo = '1' else
+                   cpuAddr_816;
 scpu_mem_dout   <= cpuDo_816;
 -- Only bank $01 is writable. A write to the ROM is dropped, and a write to
 -- bank $00 goes out to the C64 bus like any other.
