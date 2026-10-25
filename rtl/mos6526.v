@@ -248,7 +248,7 @@ always @(posedge clk) begin
             timerAff <= timerAff | (db_in[0] & ~cra[0]);
         end
         default: ;
-      endcase;
+      endcase
   end
 end
 
@@ -325,7 +325,7 @@ always @(posedge clk) begin
             timerBff <= timerBff | (db_in[0] & ~crb[0]);
         end
         default: ;
-      endcase;
+      endcase
   end
 end
 

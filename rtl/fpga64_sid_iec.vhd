@@ -315,6 +315,7 @@ signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
+signal scpu_bank00     : std_logic;
 signal emul_816        : std_logic;
 signal vpb_816         : std_logic;
 signal vda_816      : std_logic;
@@ -1108,13 +1109,28 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 -- vectors -- which is why the boot handover works without any of this. Plug a
 -- RAMLink in and mem_reg_ramlink is permanently 1, so the reroute is always on
 -- and every interrupt the machine takes goes somewhere we were not sending it.
-scpu_vec_reroute <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and
-                             (vda_816 or vpa_816) = '1' and vpb_816 = '0' and
-                             bank_816 = x"00" and cpuWe_816 = '0' and
-                             scpu_bootmap = '0' and scpu_kernal_sel = '1' and
-                             (emul_816 = '0' or scpu_hwenable = '1' or
-                              scpu_sys1mhz = '1' or scpu_dosext = '1' or
-                              scpu_ramlink = '1') else '0';
+-- The condition is its own entity so that it can be simulated: this one cannot
+-- be, as GHDL will not bind it (the CIAs are Verilog) and xsim corrupts its
+-- heap during initialisation on it. See tb_scpu_vec_reroute.
+scpu_bank00 <= '1' when bank_816 = x"00" else '0';
+
+vec_reroute_inst: entity work.scpu_vec_reroute
+port map (
+	enable_i     => scpu_enable,
+	shadow_on_i  => scpu_shadow_on,
+	bus_active_i => vda_816 or vpa_816,
+	vpb_i        => vpb_816,
+	bank00_i     => scpu_bank00,
+	is_read_i    => not cpuWe_816,
+	bootmap_i    => scpu_bootmap,
+	kernal_sel_i => scpu_kernal_sel,
+	emul_i       => emul_816,
+	hwenable_i   => scpu_hwenable,
+	sys1mhz_i    => scpu_sys1mhz,
+	dosext_i     => scpu_dosext,
+	ramlink_i    => scpu_ramlink,
+	reroute_o    => scpu_vec_reroute
+);
 
 scpu_rom_hit    <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"F8" or
@@ -1249,6 +1265,7 @@ begin
 					when "01" => turbo_m <= "110";
 					when "10" => turbo_m <= "111";
 					when "11" => turbo_m <= "111"; -- unused
+					when others => turbo_m <= "111"; -- metavalues, for simulation
 				end case;
 			end if;
 		end if;

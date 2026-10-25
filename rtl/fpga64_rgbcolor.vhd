@@ -51,6 +51,10 @@ begin
 		when X"D" => r <= X"a9"; g <= X"ff"; b <= X"9f";
 		when X"E" => r <= X"70"; g <= X"6d"; b <= X"eb";
 		when X"F" => r <= X"b2"; g <= X"b2"; b <= X"b2";
+		-- All sixteen binary values are covered above. This arm names the
+		-- metavalues too, which VHDL-2008 requires and Vivado does not, so that
+		-- this entity can be elaborated in simulation at all.
+		when others => r <= X"b2"; g <= X"b2"; b <= X"b2";
 		end case;
 	end process;
 end Behavioral;
