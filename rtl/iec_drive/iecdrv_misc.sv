@@ -384,3 +384,72 @@ always @(posedge clock_b) begin
 end
 
 endmodule
+
+// MEGA65: THE 157x ENGINE NEEDS THE OPPOSITE WRITE TIMING TO THE 1541 ENGINE, so it gets
+// its own RAM rather than a parameter on iecdrv_mem above.
+//
+// iecdrv_mem registers address and wren one cycle ahead of the data, which is what our
+// c1541 and c1581 engines are built around. The c157x engine drives wren_a from a
+// single-cycle strobe (ena_r or ph2_f) while the CPU holds address and data for the whole
+// ph2 cycle, so all three have to be consumed on the SAME edge; registering the address
+// ahead of the data stores the byte that follows the strobe and quietly corrupts the
+// drive work RAM. The DOS then still runs out of ROM and still answers ATN, but has no
+// status message, no directory and no buffers -- which reads as a broken drive rather
+// than as a RAM timing fault, and is upstream's own description of the bug.
+//
+// Keeping two modules means neither engine can be changed by accident while fixing the
+// other, which a shared module with a timing parameter does not give. WRITE_B=0 makes
+// port B read-only and USE_B=0 drops it entirely, so Vivado infers a simple dual-port
+// rather than a true dual-port with two writers on one address ([Synth 8-5796]).
+
+module iecdrv_mem_157x #(parameter DATAWIDTH, ADDRWIDTH, INITFILE=" ", WRITE_B=1, USE_B=1)
+(
+	input	                     clock_a,
+	input	     [ADDRWIDTH-1:0] address_a,
+	input	     [DATAWIDTH-1:0] data_a,
+	input	                     wren_a,
+	output reg [DATAWIDTH-1:0] q_a,
+
+	input	                     clock_b,
+	input	     [ADDRWIDTH-1:0] address_b,
+	input	     [DATAWIDTH-1:0] data_b,
+	input	                     wren_b,
+	output reg [DATAWIDTH-1:0] q_b
+);
+
+// Every caller drives wren_a from a single-cycle strobe (ena_r or ph2_f) while the CPU
+// holds address and data for the whole ph2 cycle, so address, data and wren have to be
+// consumed on the same edge. Registering the address ahead of the data writes the byte
+// that follows the strobe, which corrupts the drive's work RAM: the DOS then still runs
+// from ROM and answers ATN, but has no status message, no directory and no buffers.
+reg [DATAWIDTH-1:0] ram[1<<ADDRWIDTH];
+
+always @(posedge clock_a) begin
+	if(wren_a) begin
+		ram[address_a] <= data_a;
+		q_a <= data_a;
+	end else begin
+		q_a <= ram[address_a];
+	end
+end
+
+generate
+	if (!USE_B) begin :port_b_unused
+		always @(*) q_b = {DATAWIDTH{1'b0}};
+	end
+	else if (WRITE_B) begin :port_b_rw
+		always @(posedge clock_b) begin
+			if(wren_b) begin
+				ram[address_b] <= data_b;
+				q_b <= data_b;
+			end else begin
+				q_b <= ram[address_b];
+			end
+		end
+	end
+	else begin :port_b_ro
+		always @(posedge clock_b) q_b <= ram[address_b];
+	end
+endgenerate
+
+endmodule
