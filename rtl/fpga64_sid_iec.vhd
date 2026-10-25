@@ -136,6 +136,12 @@ port(
 	-- whether the accelerator is taking interrupts at all, which is the difference
 	-- between a handover that never starts and one that starts and does not finish.
 	scpu_vpb    : out std_logic := '1';
+	-- CIA1 interrupt request, low active, brought out for the SuperCPU
+	-- diagnostic. Once the C64 KERNAL is up this is the ONLY interrupt source
+	-- that scans the keyboard, so counting it separately from the vector pulls
+	-- tells apart "the CIA never asked" from "the CIA asked and the processor
+	-- ignored it".
+	cia1_irq_n_o : out std_logic := '1';
 	scpu_bank   : out unsigned(7 downto 0);
 
 	-- MEGA65 (CMD SuperCPU): the accelerator's own memory, which lives in
@@ -1206,6 +1212,7 @@ nmi_ack     <= nmiAck_6510  when scpu_enable = '0' else nmiAck_816;
 scpu_bank   <= bank_816;
 scpu_vpb    <= vpb_816;
 scpu_emul   <= emul_816;
+cia1_irq_n_o <= irq_cia1;
 scpu_io_o   <= '1' when cpuIO(2) = '1' and (cpuIO(0) = '1' or cpuIO(1) = '1') else '0';
 
 -- What the 65C816 reads: its own ROM, its own shadow, or the C64 bus.
