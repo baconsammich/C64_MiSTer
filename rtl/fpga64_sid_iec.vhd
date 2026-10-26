@@ -118,7 +118,6 @@ port(
 	-- $0100 for any access the accelerator serves internally, and feeding them back
 	-- in would also close a combinational loop through scpu_mem_hit. Default '0' so
 	-- a board with no RAMLink behaves exactly as before.
-	scpu_rl_dos_i    : in  std_logic := '0';   -- RL-DOS mapped at $8000-$BFFF
 	-- I/O is BANKED IN, i.e. the PLA maps the chips into $D000-$DFFF rather than
 	-- RAM or the character ROM. The accelerator's registers live inside that
 	-- space and must decode only while it exists: with LORAM and HIRAM both low
@@ -332,7 +331,7 @@ signal scpu_boot_win   : std_logic;
 signal scpu_kshadow_lo : std_logic;
 signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
-signal scpu_basic_own  : std_logic;   -- basic_sel AND the RAMLink does not own it
+signal scpu_rldos_sel  : std_logic;   -- a DOS-extension window, mirrored 1:1 from bank $01
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
@@ -1152,22 +1151,51 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 -- would switch the reroute off whenever the RAMLink is on, which is the one
 -- situation it exists for. So the sels keep their meaning and only the shadow and
 -- ROM hit decisions below consult ownership.
--- $A000-$BFFF ONLY. THE KERNAL STAYS WITH THE ACCELERATOR.
+-- THE DOS EXTENSION WINDOWS. This is what device 16 was missing.
 --
--- Standing down for $E000-$FFFF black-screens the machine, twice over. The
--- SuperCPU shadow holds the KERNAL the running system depends on -- it copied it
--- at boot -- and handing that window to the RAMLink takes it away mid-flight:
--- with the RAMLink merely present the processor lost its own reset vector before
--- the BIOS ever ran, and with the DOS actually mapped the KERNAL changed under a
--- machine already executing from it. Measured both ways: SuperCPU alone boots,
--- switch the RAMLink on and the screen goes black.
+-- CMD documents the accelerator's bank-1 SRAM as holding more than BASIC and the
+-- KERNAL. Reading their mirroring table bank 1 -> bank 0:
 --
--- It was never needed anyway. The RL-DOS lives at $8000-$BFFF, and $8000-$9FFF
--- already reached it because no sel covers that range -- $A000-$BFFF was the one
--- half being shadowed over, and device 16 is what that costs. A real RAMLink
--- hooks the KERNAL through the RAM vectors at $0314-$0333, not by replacing the
--- ROM, so the accelerator keeping $E000-$FFFF costs the DOS nothing.
-scpu_basic_own  <= scpu_basic_sel and not scpu_rl_dos_i;
+--   bank 1 $8000-$9FFF  RLDOS        -> $8000-$9FFF  read only, if DOS extensions enabled
+--   bank 1 $1000-$5FFF  RLDOS        -> $1000-$5FFF  read only, if DOS extensions enabled
+--   bank 1 $6000-$7FFF  ALT. KERNAL  -> $E000-$FFFF  read only, if H/W registers enabled
+--   bank 1 $A000-$BFFF  BASIC        -> $A000-$BFFF  read only, if BASIC enabled
+--   bank 1 $E000-$FFFF  KERNAL       -> $E000-$FFFF  read only, if H/W registers disabled
+--
+-- The last three were implemented; the first two never were. scpu_dosext came all
+-- the way in here and gated nothing but the vector reroute, so with DOS extensions
+-- enabled the processor read ordinary C64 RAM where the RL-DOS should have been.
+-- That is why no device 16 ever answered: the SuperCPU runs its OWN RL-DOS, in
+-- native 65816 code out of its own SRAM, and the windows it lives in did not exist.
+--
+-- The ALT. KERNAL row is the one already handled, by scpu_kshadow_lo remapping
+-- $E000-$FFFF to $6000-$7FFF when the register bank is open -- and the BIOS move
+-- $F8:8000 -> $01:6000 that tb_65816_mvn covers is exactly that image being
+-- loaded, which is good evidence this table describes the ROM we have.
+--
+-- Both RLDOS windows are 1:1, so scpu_mem_addr needs no remapping, and both are
+-- read only -- the shadow hit below already requires cpuWe_816 = '0'.
+scpu_rldos_sel  <= '1' when scpu_dosext = '1' and
+                            ((cpuAddr_816 >= x"1000" and cpuAddr_816 <= x"5FFF") or
+                             (cpuAddr_816 >= x"8000" and cpuAddr_816 <= x"9FFF"))
+                   else '0';
+
+-- REVERTED: the accelerator keeps BASIC and the KERNAL, and that is correct.
+--
+-- A gate here let the RAMLink's ROM through at $A000-$BFFF, on the theory that
+-- an unreachable RL-DOS was why device 16 never answered. Two things killed it.
+--
+-- The topology is the other way round from what that assumed: the SuperCPU plugs
+-- into the C64 and the RAMLink hangs off the accelerator's passthrough, so the
+-- accelerator is FIRST on the bus and the RAMLink ROM is bypassed by
+-- construction. The SuperCPU runs its OWN RL-DOS out of bank $F8 in native
+-- 65816 code -- the strings are there, PARTITION FULL at $02DE7 and RAMLINK 1 at
+-- $051D5 -- and that is what should be answering for device 16.
+--
+-- And CMD documents that a cartridge pulling /GAME low with /EXROM high, i.e.
+-- ultimax, "replaces the KERNAL and leaves the accelerator inoperable", naming
+-- Action Replay and Super Snapshot. That is precisely what main.vhd asserts for
+-- a RAMLink claim, so the real fault is on that side, not here.
 
 -- Every one of these is gated on scpu_shadow_on, which main.vhd drives from
 -- "QNICE has actually streamed a SuperCPU ROM in". Without one there is nothing
@@ -1203,7 +1231,7 @@ scpu_shadow_byp <= '1' when C_SCPU_SHADOW_BYPASS and scpu_enable = '1' and
                             bank_816 = x"00" and scpu_bootmap = '0' and
                             cpuWe_816 = '0' and scpu_io_win = '0' and
                             scpu_vec_reroute = '0' and scpu_kshadow_lo = '0' and
-                            (scpu_basic_own = '1' or
+                            (scpu_basic_sel = '1' or
                              (scpu_kernal_sel = '1' and cpuAddr_816 < x"FBE1"))
                    else '0';
 
@@ -1265,7 +1293,8 @@ scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                              (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
                               cpuWe_816 = '0' and scpu_io_win = '0' and
                               scpu_vec_reroute = '0' and scpu_shadow_byp = '0' and
-                              (scpu_basic_own or scpu_kernal_sel) = '1')) else '0';
+                              (scpu_basic_sel or scpu_kernal_sel or
+                               scpu_rldos_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
 -- WHERE THE KERNAL SHADOW LIVES, which depends on whether the register bank is
