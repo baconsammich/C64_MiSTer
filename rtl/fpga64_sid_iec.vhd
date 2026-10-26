@@ -328,6 +328,10 @@ signal scpu_kernal_sel : std_logic;
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
+signal scpu_shadow_byp : std_logic;
+-- Read the KERNAL and BASIC from the accelerator ROM rather than the corrupt
+-- shadow; see the full note at the scpu_shadow_byp assignment below.
+constant C_SCPU_SHADOW_BYPASS : boolean := true;
 signal vic_d011_q      : unsigned(7 downto 0) := (others => '0');
 signal vic_d020_q      : unsigned(7 downto 0) := (others => '0');
 signal emul_816        : std_logic;
@@ -1125,6 +1129,39 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 -- at bank $F8 and nothing in the shadow, and bootmap would otherwise point the
 -- processor at an empty block RAM from its very first fetch. With no ROM the
 -- accelerator runs the stock C64 map, which is the mode that works today.
+-- READ THE KERNAL AND BASIC FROM THE ROM INSTEAD OF THE SHADOW.
+--
+-- A diagnostic, and possibly a usable workaround. The shadow block RAM on the
+-- board is SPARSELY corrupt: a self-check on its idle second port reports
+-- shadow[$EB79] = $B5 where the accelerator ROM holds $81, with 3 of 16 probe
+-- points wrong. $EB79 is the C64 keyboard table pointer, so the KERNAL's
+-- LDA ($F5),Y reads I/O space, gets $FF, and $EB32 discards every keystroke --
+-- which is the whole reported fault. Nothing reproduces it off the board: the
+-- processor, MVN on all three windows, PLB, DBR across interrupts and the write
+-- path driving the real block RAM are all clean in simulation.
+--
+-- The two 1:1 windows can come from the ROM instead, because the copy is
+-- address-for-address: $F8:A000-$BFFF to $01:A000-$BFFF and $F8:E000-$FFFF to
+-- $01:E000-$FFFF. So for those, scpu_rom_q at the SAME address is the byte the
+-- shadow was supposed to hold.
+--
+-- NOT a blanket bypass, deliberately. The BIOS patches the shadow from $FBE1
+-- upwards with its interrupt redirection table and its own vectors, so reading
+-- that range from the ROM would hand the processor unpatched vectors and break
+-- the interrupt path. Only below $FBE1 is substituted. The hwenable mapping is
+-- left alone too: that one moves the window to $6000 and is not 1:1, and it is
+-- only live while the register bank is open.
+--
+-- Set C_SCPU_SHADOW_BYPASS (declared above) to false to read the shadow again.
+scpu_shadow_byp <= '1' when C_SCPU_SHADOW_BYPASS and scpu_enable = '1' and
+                            scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
+                            bank_816 = x"00" and scpu_bootmap = '0' and
+                            cpuWe_816 = '0' and scpu_io_win = '0' and
+                            scpu_vec_reroute = '0' and scpu_kshadow_lo = '0' and
+                            (scpu_basic_sel = '1' or
+                             (scpu_kernal_sel = '1' and cpuAddr_816 < x"FBE1"))
+                   else '0';
+
 -- THE INTERRUPT VECTOR REROUTE. A SuperCPU does not always take its interrupt
 -- vectors from page $FF of bank $00: under the conditions below it reads them
 -- from bank $F8 instead, so $FFFE becomes $F8:FFFE. In ROM 2.04 that holds
@@ -1176,12 +1213,13 @@ scpu_rom_hit    <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                             (bank_816 = x"F8" or
                              (bank_816 = x"00" and scpu_bootmap = '1' and cpuWe_816 = '0' and
                               scpu_boot_win = '1' and scpu_io_win = '0') or
-                             scpu_vec_reroute = '1') else '0';
+                             scpu_vec_reroute = '1' or
+                             scpu_shadow_byp = '1') else '0';
 scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"01" or
                              (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
                               cpuWe_816 = '0' and scpu_io_win = '0' and
-                              scpu_vec_reroute = '0' and
+                              scpu_vec_reroute = '0' and scpu_shadow_byp = '0' and
                               (scpu_basic_sel or scpu_kernal_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
