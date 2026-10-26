@@ -168,6 +168,14 @@ port(
 	-- comes from the processor itself.
 	scpu_sys1mhz   : in  std_logic := '0';  -- the system 1 MHz flag, $D072/$D073
 	scpu_dosext    : in  std_logic := '0';  -- RL-DOS shadowing is on
+	-- The JiffyDOS switch on the cartridge. This scpu.rom (SuperCPU DOS 2.04,
+	-- (C)1996) carries no JiffyDOS: its $E000-$FFFF differs from jd-c64.bin by
+	-- 2155 bytes, which is WORSE than the 2063 two unrelated C64 KERNALs differ
+	-- by, and no banner appears in any encoding. CMD shipped the SuperCPU both
+	-- with and without. So when the switch is on, the accelerator stands aside
+	-- for $E000-$FBE0 and the C64's own custom KERNAL -- the JiffyDOS image the
+	-- core already loads from jd-c64.bin -- is what executes.
+	scpu_jiffy_i   : in  std_logic := '0';
 	scpu_ramlink   : in  std_logic := '0';  -- a RAMLink is present
 	scpu_mem_addr  : out unsigned(15 downto 0);
 	scpu_mem_dout  : out unsigned(7 downto 0);
@@ -332,6 +340,7 @@ signal scpu_kshadow_lo : std_logic;
 signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_rldos_sel  : std_logic;   -- a DOS-extension window, mirrored 1:1 from bank $01
+signal scpu_kernal_own : std_logic;   -- kernal_sel, unless JiffyDOS owns the window
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
@@ -1175,6 +1184,19 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 --
 -- Both RLDOS windows are 1:1, so scpu_mem_addr needs no remapping, and both are
 -- read only -- the shadow hit below already requires cpuWe_816 = '0'.
+-- WHO OWNS $E000-$FBE0: the accelerator, or JiffyDOS.
+--
+-- $FBE1 upwards always stays with the accelerator -- that is where the BIOS
+-- writes its interrupt redirection table and its own vectors, and serving those
+-- from anywhere else breaks the interrupt path. Below it, the JiffyDOS switch
+-- hands the window to the C64's own KERNAL.
+--
+-- This costs nothing here. On real hardware the shadow exists because reading
+-- physical ROM at 20 MHz is too slow; in this core the C64's KERNAL is already
+-- single-cycle block RAM, so there is no slow path to avoid.
+scpu_kernal_own <= '0' when scpu_jiffy_i = '1' and cpuAddr_816 < x"FBE1" else
+                   scpu_kernal_sel;
+
 scpu_rldos_sel  <= '1' when scpu_dosext = '1' and
                             ((cpuAddr_816 >= x"1000" and cpuAddr_816 <= x"5FFF") or
                              (cpuAddr_816 >= x"8000" and cpuAddr_816 <= x"9FFF"))
@@ -1232,7 +1254,7 @@ scpu_shadow_byp <= '1' when C_SCPU_SHADOW_BYPASS and scpu_enable = '1' and
                             cpuWe_816 = '0' and scpu_io_win = '0' and
                             scpu_vec_reroute = '0' and scpu_kshadow_lo = '0' and
                             (scpu_basic_sel = '1' or
-                             (scpu_kernal_sel = '1' and cpuAddr_816 < x"FBE1"))
+                             (scpu_kernal_own = '1' and cpuAddr_816 < x"FBE1"))
                    else '0';
 
 -- THE INTERRUPT VECTOR REROUTE. A SuperCPU does not always take its interrupt
@@ -1293,7 +1315,7 @@ scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                              (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
                               cpuWe_816 = '0' and scpu_io_win = '0' and
                               scpu_vec_reroute = '0' and scpu_shadow_byp = '0' and
-                              (scpu_basic_sel or scpu_kernal_sel or
+                              (scpu_basic_sel or scpu_kernal_own or
                                scpu_rldos_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
