@@ -119,7 +119,6 @@ port(
 	-- in would also close a combinational loop through scpu_mem_hit. Default '0' so
 	-- a board with no RAMLink behaves exactly as before.
 	scpu_rl_dos_i    : in  std_logic := '0';   -- RL-DOS mapped at $8000-$BFFF
-	scpu_rl_kernal_i : in  std_logic := '0';   -- RL-DOS mapped at $E000-$FFFF
 	-- I/O is BANKED IN, i.e. the PLA maps the chips into $D000-$DFFF rather than
 	-- RAM or the character ROM. The accelerator's registers live inside that
 	-- space and must decode only while it exists: with LORAM and HIRAM both low
@@ -334,7 +333,6 @@ signal scpu_kshadow_lo : std_logic;
 signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_basic_own  : std_logic;   -- basic_sel AND the RAMLink does not own it
-signal scpu_kernal_own : std_logic;   -- kernal_sel AND the RAMLink does not own it
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
@@ -1154,8 +1152,22 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 -- would switch the reroute off whenever the RAMLink is on, which is the one
 -- situation it exists for. So the sels keep their meaning and only the shadow and
 -- ROM hit decisions below consult ownership.
-scpu_basic_own  <= scpu_basic_sel  and not scpu_rl_dos_i;
-scpu_kernal_own <= scpu_kernal_sel and not scpu_rl_kernal_i;
+-- $A000-$BFFF ONLY. THE KERNAL STAYS WITH THE ACCELERATOR.
+--
+-- Standing down for $E000-$FFFF black-screens the machine, twice over. The
+-- SuperCPU shadow holds the KERNAL the running system depends on -- it copied it
+-- at boot -- and handing that window to the RAMLink takes it away mid-flight:
+-- with the RAMLink merely present the processor lost its own reset vector before
+-- the BIOS ever ran, and with the DOS actually mapped the KERNAL changed under a
+-- machine already executing from it. Measured both ways: SuperCPU alone boots,
+-- switch the RAMLink on and the screen goes black.
+--
+-- It was never needed anyway. The RL-DOS lives at $8000-$BFFF, and $8000-$9FFF
+-- already reached it because no sel covers that range -- $A000-$BFFF was the one
+-- half being shadowed over, and device 16 is what that costs. A real RAMLink
+-- hooks the KERNAL through the RAM vectors at $0314-$0333, not by replacing the
+-- ROM, so the accelerator keeping $E000-$FFFF costs the DOS nothing.
+scpu_basic_own  <= scpu_basic_sel and not scpu_rl_dos_i;
 
 -- Every one of these is gated on scpu_shadow_on, which main.vhd drives from
 -- "QNICE has actually streamed a SuperCPU ROM in". Without one there is nothing
@@ -1192,7 +1204,7 @@ scpu_shadow_byp <= '1' when C_SCPU_SHADOW_BYPASS and scpu_enable = '1' and
                             cpuWe_816 = '0' and scpu_io_win = '0' and
                             scpu_vec_reroute = '0' and scpu_kshadow_lo = '0' and
                             (scpu_basic_own = '1' or
-                             (scpu_kernal_own = '1' and cpuAddr_816 < x"FBE1"))
+                             (scpu_kernal_sel = '1' and cpuAddr_816 < x"FBE1"))
                    else '0';
 
 -- THE INTERRUPT VECTOR REROUTE. A SuperCPU does not always take its interrupt
@@ -1253,7 +1265,7 @@ scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                              (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
                               cpuWe_816 = '0' and scpu_io_win = '0' and
                               scpu_vec_reroute = '0' and scpu_shadow_byp = '0' and
-                              (scpu_basic_own or scpu_kernal_own) = '1')) else '0';
+                              (scpu_basic_own or scpu_kernal_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
 -- WHERE THE KERNAL SHADOW LIVES, which depends on whether the register bank is
