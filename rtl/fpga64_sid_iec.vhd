@@ -112,6 +112,14 @@ port(
 	-- MEGA65 (CMD SuperCPU): read override inside VIC-II space, see fpga64_buslogic.
 	scpu_oe     : in  std_logic := '0';
 	scpu_data   : in  unsigned(7 downto 0) := (others => '1');
+	-- MEGA65 (CMD RAMLink): which windows the RL-DOS owns, so the accelerator does
+	-- not substitute its own BASIC or KERNAL over them. State only, NOT an address
+	-- decode -- main.vhd computes the claims from c64_ram_addr_o, which is forced to
+	-- $0100 for any access the accelerator serves internally, and feeding them back
+	-- in would also close a combinational loop through scpu_mem_hit. Default '0' so
+	-- a board with no RAMLink behaves exactly as before.
+	scpu_rl_dos_i    : in  std_logic := '0';   -- RL-DOS mapped at $8000-$BFFF
+	scpu_rl_kernal_i : in  std_logic := '0';   -- RL-DOS mapped at $E000-$FFFF
 	-- I/O is BANKED IN, i.e. the PLA maps the chips into $D000-$DFFF rather than
 	-- RAM or the character ROM. The accelerator's registers live inside that
 	-- space and must decode only while it exists: with LORAM and HIRAM both low
@@ -325,6 +333,8 @@ signal scpu_boot_win   : std_logic;
 signal scpu_kshadow_lo : std_logic;
 signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
+signal scpu_basic_own  : std_logic;   -- basic_sel AND the RAMLink does not own it
+signal scpu_kernal_own : std_logic;   -- kernal_sel AND the RAMLink does not own it
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
@@ -1124,6 +1134,29 @@ scpu_boot_win   <= '1' when cpuAddr_816(15) = '1' and cpuAddr_816(15 downto 12) 
 scpu_basic_sel  <= '1' when cpuAddr_816(15 downto 13) = "101" and cpuIO(0) = '1' and cpuIO(1) = '1' else '0';
 scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1' else '0';
 
+-- WHO OWNS $A000-$BFFF AND $E000-$FFFF WHEN A RAMLINK IS IN.
+--
+-- The RAMLink maps its RL-DOS by putting this core into ULTIMAX and driving the
+-- read data from main.vhd (see the comment above rl_claim_lo there). In ultimax
+-- the buslogic decodes a CPU cycle as $8000-$9FFF -> cs_romL,
+-- $A000-$BFFF -> cs_UMAXnomap and $E000-$FFFF -> cs_romH, all three of which
+-- route the byte from c64_ram_data.
+--
+-- The two sel signals above look at the CPU port bits ONLY -- no game, no exrom,
+-- no ultimax -- so with a RAMLink mapped in the accelerator used to substitute
+-- BASIC over $A000-$BFFF and the KERNAL over $E000-$FFFF, leaving just
+-- $8000-$9FFF reaching the DOS. Two thirds of it was invisible, which is why the
+-- machine booted and looked healthy but no device 16 ever answered
+-- (?DEVICE NOT PRESENT, because the call fell through to the real serial bus).
+--
+-- These are SEPARATE signals rather than a gate on the sels themselves, because
+-- scpu_vec_reroute depends on kernal_sel through page_ff_is_shadow: gating that
+-- would switch the reroute off whenever the RAMLink is on, which is the one
+-- situation it exists for. So the sels keep their meaning and only the shadow and
+-- ROM hit decisions below consult ownership.
+scpu_basic_own  <= scpu_basic_sel  and not scpu_rl_dos_i;
+scpu_kernal_own <= scpu_kernal_sel and not scpu_rl_kernal_i;
+
 -- Every one of these is gated on scpu_shadow_on, which main.vhd drives from
 -- "QNICE has actually streamed a SuperCPU ROM in". Without one there is nothing
 -- at bank $F8 and nothing in the shadow, and bootmap would otherwise point the
@@ -1158,8 +1191,8 @@ scpu_shadow_byp <= '1' when C_SCPU_SHADOW_BYPASS and scpu_enable = '1' and
                             bank_816 = x"00" and scpu_bootmap = '0' and
                             cpuWe_816 = '0' and scpu_io_win = '0' and
                             scpu_vec_reroute = '0' and scpu_kshadow_lo = '0' and
-                            (scpu_basic_sel = '1' or
-                             (scpu_kernal_sel = '1' and cpuAddr_816 < x"FBE1"))
+                            (scpu_basic_own = '1' or
+                             (scpu_kernal_own = '1' and cpuAddr_816 < x"FBE1"))
                    else '0';
 
 -- THE INTERRUPT VECTOR REROUTE. A SuperCPU does not always take its interrupt
@@ -1220,7 +1253,7 @@ scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                              (bank_816 = x"00" and scpu_bootmap = '0' and scpu_shadow_on = '1' and
                               cpuWe_816 = '0' and scpu_io_win = '0' and
                               scpu_vec_reroute = '0' and scpu_shadow_byp = '0' and
-                              (scpu_basic_sel or scpu_kernal_sel) = '1')) else '0';
+                              (scpu_basic_own or scpu_kernal_own) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
 -- WHERE THE KERNAL SHADOW LIVES, which depends on whether the register bank is
