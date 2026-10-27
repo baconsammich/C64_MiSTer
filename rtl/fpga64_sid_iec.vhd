@@ -367,6 +367,7 @@ signal scpu_shadow_byp : std_logic;
 -- Read the KERNAL and BASIC from the accelerator ROM rather than the corrupt
 -- shadow; see the full note at the scpu_shadow_byp assignment below.
 constant C_SCPU_SHADOW_BYPASS : boolean := true;
+constant C_SCPU_PRIVATE_CE    : boolean := false;
 signal vic_d011_q      : unsigned(7 downto 0) := (others => '0');
 signal vic_d020_q      : unsigned(7 downto 0) := (others => '0');
 signal emul_816        : std_logic;
@@ -1428,7 +1429,10 @@ scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 -- Suppressing scpu_ce for one clock after ANY enable makes the worst case exactly
 -- the 1-in-2 the bench has validated. enableCpu itself is never suppressed, so the
 -- C64-bus timing the rest of the core depends on is untouched.
-scpu_ce         <= '1' when scpu_enable = '1' and turbo_mode(1) = '1' and
+-- C_SCPU_PRIVATE_CE turns the faster private-memory enable on. OFF for now: it
+-- is untested on hardware, and this build exists to test the menu rework alone.
+-- Flip it to true to get stage (a) back.
+scpu_ce         <= '1' when C_SCPU_PRIVATE_CE and scpu_enable = '1' and turbo_mode(1) = '1' and
                             scpu_mem_hit = '1' and scpu_ce_tick = '1' and
                             scpu_en_d = '0' and
                             dma_active = '0' and baLoc = '1' else '0';
