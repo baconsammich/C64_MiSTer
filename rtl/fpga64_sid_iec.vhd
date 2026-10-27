@@ -353,6 +353,7 @@ signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_rldos_sel  : std_logic;   -- a DOS-extension window, mirrored 1:1 from bank $01
 signal scpu_kernal_own : std_logic;   -- kernal_sel, unless JiffyDOS owns the window
+signal scpu_rl_probe   : std_logic;   -- the BIOS RAMLink signature read at $E0AB
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
@@ -1196,16 +1197,50 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 --
 -- Both RLDOS windows are 1:1, so scpu_mem_addr needs no remapping, and both are
 -- read only -- the shadow hit below already requires cpuWe_816 = '0'.
--- WHO OWNS $E000-$FBE0: the accelerator, or JiffyDOS.
+-- THE RAMLINK PROBE WINDOW. $E000-$FFFF goes to the cartridge, briefly.
 --
--- $FBE1 upwards always stays with the accelerator -- that is where the BIOS
--- writes its interrupt redirection table and its own vectors, and serving those
--- from anywhere else breaks the interrupt path. Below it, the JiffyDOS switch
--- hands the window to the C64's own KERNAL.
+-- The SuperCPU BIOS decides whether a RAMLink exists by reading ONE byte, at
+-- scpu.rom offset $314:
+--     STA $D0BE      ; DOS extensions ON
+--     LDA $E0AB      ; the signature
+--     STA $D0BF      ; DOS extensions OFF
+--     CMP #$7E
+--     BNE +$66       ; skip the entire RAMLink init
+--     ... STA $DF7E  ; the first of 62
 --
--- This costs nothing here. On real hardware the shadow exists because reading
--- physical ROM at 20 MHz is too slow; in this core the C64's KERNAL is already
--- single-cycle block RAM, so there is no slow path to avoid.
+-- That read has to reach the cartridge, and today it does not: the accelerator
+-- serves it from its own image, where scpu.rom[$E0AB] = $C8. The byte the BIOS
+-- wants is ramlink.rom[$A0AB] = $7E -- the HIGH half of the RAMLink's fixed bank
+-- 2, which rl_claim_kernal already serves correctly once the read arrives, and
+-- which is the half selected while rl_on = 0.
+--
+-- VICE indexes its $E000-$FFFF table by (pport&7) | exrom<<3 | game<<4 |
+-- hwenable<<5 | dosext<<6 | bootmap<<7, and routes a bank $00 read to the
+-- cartridge only at k = 240..247. BOOTMAP IS DELIBERATELY NOT REQUIRED HERE: this
+-- ROM clears it with STA $D0B6 at $019C, long before the probe at $0314, so a
+-- bootmap term would never fire and the whole fix would be inert. Our bootmap
+-- timing simply differs from VICE's model at this point.
+--
+-- What is used instead is the ROM's own bracket. $D0BE and $D0BF sit three
+-- instructions apart around this one read and around nothing else on the boot
+-- path, so dosext AND hwenable IS the signal, and it is as narrow as a mode gate
+-- can be.
+--
+-- Neither image inside scpu.rom can satisfy the compare: the normal KERNAL has
+-- $C8 at $E0AB and the ALT KERNAL, which is what $E000 serves while the register
+-- bank is open, has $F6. Only the cartridge has $7E. So the hand-over is not an
+-- optimisation, it is the only way the probe can ever pass.
+--
+-- So this is not a mode, it is a three-instruction window the BIOS opens itself
+-- and closes on the very next store. That is what makes it safe: an
+-- unconditional hand-over black-screened the machine twice, because the BIOS
+-- keeps executing from $E000-$FBE0 long after bootmap clears.
+scpu_rl_probe   <= '1' when scpu_ramlink = '1' and
+                            scpu_dosext = '1' and scpu_hwenable = '1' and
+                            bank_816 = x"00" and cpuWe_816 = '0' and
+                            cpuAddr_816(15 downto 13) = "111"
+                   else '0';
+
 -- WHO OWNS $E000-$FBE0: the accelerator, or JiffyDOS.
 --
 -- RESTORED. This was removed on the theory that standing aside pulls code out
@@ -1336,7 +1371,8 @@ port map (
 scpu_rom_hit    <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"F8" or
                              (bank_816 = x"00" and scpu_bootmap = '1' and cpuWe_816 = '0' and
-                              scpu_boot_win = '1' and scpu_io_win = '0') or
+                              scpu_boot_win = '1' and scpu_io_win = '0' and
+                              scpu_rl_probe = '0') or
                              scpu_vec_reroute = '1' or
                              scpu_shadow_byp = '1') else '0';
 scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
