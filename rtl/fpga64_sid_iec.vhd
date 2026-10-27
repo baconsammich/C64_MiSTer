@@ -359,6 +359,7 @@ signal scpu_rl_probe   : std_logic;   -- the BIOS RAMLink signature read at $E0A
 signal scpu_ce_tick    : std_logic := '0';  -- every other clock
 signal scpu_ce         : std_logic;   -- private-memory enable, independent of sysCycle
 signal scpu_en_816     : std_logic;   -- what the 65C816 actually runs on
+signal scpu_en_d       : std_logic := '0';  -- it, one clock ago
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
@@ -1413,8 +1414,23 @@ scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 -- turbo_mode(1) is scpu_run AND the SuperCPU fast flag, so a software or switch
 -- request for 1 MHz closes this down exactly as it already closes the turbo
 -- slots, and the accelerator falls back to CPUC alone.
+-- NEVER TWO ENABLES IN A ROW. scpu_en_d is what makes this correct, and leaving
+-- it out is what black-screened the machine on the first attempt.
+--
+-- scpu_ce and enableCpu are independent, so OR-ing them can land an enable on two
+-- CONSECUTIVE clocks -- enableCpu on one, scpu_ce on the next. That is the 1-in-1
+-- case, and the 65C816 cannot sustain it against a registered block RAM: in
+-- tb_65816_mvn at CE 1-in-1 the processor never reaches the done marker at all,
+-- where 1-in-2 and 1-in-4 both finish with every byte correct. It hangs, which on
+-- hardware was a black screen and a status word reading 40 enables per 256 PHI2
+-- instead of the 1024 it had before.
+--
+-- Suppressing scpu_ce for one clock after ANY enable makes the worst case exactly
+-- the 1-in-2 the bench has validated. enableCpu itself is never suppressed, so the
+-- C64-bus timing the rest of the core depends on is untouched.
 scpu_ce         <= '1' when scpu_enable = '1' and turbo_mode(1) = '1' and
                             scpu_mem_hit = '1' and scpu_ce_tick = '1' and
+                            scpu_en_d = '0' and
                             dma_active = '0' and baLoc = '1' else '0';
 
 scpu_en_816     <= (enableCpu and not dma_active and scpu_enable) or scpu_ce;
@@ -1424,6 +1440,7 @@ process(clk32)
 begin
    if rising_edge(clk32) then
       scpu_ce_tick <= not scpu_ce_tick;
+      scpu_en_d    <= scpu_en_816;
    end if;
 end process;
 
