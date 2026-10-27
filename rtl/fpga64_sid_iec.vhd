@@ -176,6 +176,18 @@ port(
 	-- for $E000-$FBE0 and the C64's own custom KERNAL -- the JiffyDOS image the
 	-- core already loads from jd-c64.bin -- is what executes.
 	scpu_jiffy_i   : in  std_logic := '0';
+	-- Probe: a bank $00 read was served from one of the RL-DOS mirror windows.
+	-- main.vhd counts these, because whether those windows are ever USED is the
+	-- thing that separates "the BIOS never copied RL-DOS into bank $01" from
+	-- "it did and the windows are wrong".
+	scpu_rldos_hit_o : out std_logic;   -- bank $00, through the mirror window
+	-- bank $01 directly, in the same address ranges. The accelerator RL-DOS is
+	-- native 65816 code and may well run where it lives rather than through the
+	-- bank $00 mirror, so counting only the mirror cannot tell "never copied"
+	-- apart from "running natively".
+	scpu_rldos_b1_o  : out std_logic;
+	-- and an opcode FETCH there, which is execution rather than a data read
+	scpu_rldos_exe_o : out std_logic;
 	scpu_ramlink   : in  std_logic := '0';  -- a RAMLink is present
 	scpu_mem_addr  : out unsigned(15 downto 0);
 	scpu_mem_dout  : out unsigned(7 downto 0);
@@ -1194,8 +1206,20 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 -- This costs nothing here. On real hardware the shadow exists because reading
 -- physical ROM at 20 MHz is too slow; in this core the C64's KERNAL is already
 -- single-cycle block RAM, so there is no slow path to avoid.
-scpu_kernal_own <= '0' when scpu_jiffy_i = '1' and cpuAddr_816 < x"FBE1" else
-                   scpu_kernal_sel;
+-- THE ACCELERATOR KEEPS $E000-$FBE0. Standing aside for JiffyDOS here does not
+-- work and cannot be made to work by gating on bootmap.
+--
+-- The BIOS clears bootmap and then goes on running from $E000-$FBE0 for a long
+-- time: it paints its logo and waits 100 raster interrupts before the C64 KERNAL
+-- is ever entered. Swapping that window for JiffyDOS pulls the code out from
+-- under a running BIOS, which dies and resets, which re-arms bootmap. Measured as
+-- word 1 = $CAC0 -- enabled, register bank open, bootmap SET, JiffyDOS switch on
+-- -- the stuck-BIOS signature, and a black screen.
+--
+-- scpu_shadow_hit and scpu_shadow_byp already require bootmap = '0', so the
+-- damage is after that point and no bootmap gate reaches it. JiffyDOS has to get
+-- into what the BIOS COPIES, not be substituted for it afterwards.
+scpu_kernal_own <= scpu_kernal_sel;
 
 scpu_rldos_sel  <= '1' when scpu_dosext = '1' and
                             ((cpuAddr_816 >= x"1000" and cpuAddr_816 <= x"5FFF") or
@@ -1318,6 +1342,31 @@ scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                               (scpu_basic_sel or scpu_kernal_own or
                                scpu_rldos_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
+
+-- A read actually being served out of an RL-DOS window, as opposed to the window
+-- merely being open.
+scpu_rldos_hit_o <= '1' when scpu_shadow_hit = '1' and bank_816 = x"00" and
+                             scpu_rldos_sel = '1' else '0';
+
+-- The same address ranges in bank $01, where the RL-DOS actually lives. Not
+-- gated on scpu_dosext: the question is whether anything is there and running at
+-- all, which is prior to whether the mirror is switched on.
+scpu_rldos_b1_o  <= '1' when scpu_shadow_hit = '1' and bank_816 = x"01" and
+                             ((cpuAddr_816 >= x"1000" and cpuAddr_816 <= x"5FFF") or
+                              (cpuAddr_816 >= x"8000" and cpuAddr_816 <= x"9FFF"))
+                    else '0';
+
+-- vpa alone is an opcode fetch; vda with vpa is a data access. So vpa and not
+-- vda is the processor fetching an instruction, which proves execution.
+-- NARROWED. This used to accept bank $00 too, so ordinary C64 code executing in
+-- $1000-$5FFF saturated it -- it read $F with the RAMLink switched off entirely,
+-- which is nothing to do with RL-DOS. Only bank $01, and only while the mirror is
+-- enabled, is actually the accelerator running its own DOS.
+scpu_rldos_exe_o <= '1' when scpu_enable = '1' and vpa_816 = '1' and vda_816 = '0' and
+                             scpu_dosext = '1' and bank_816 = x"01" and
+                             ((cpuAddr_816 >= x"1000" and cpuAddr_816 <= x"5FFF") or
+                              (cpuAddr_816 >= x"8000" and cpuAddr_816 <= x"9FFF"))
+                    else '0';
 
 -- WHERE THE KERNAL SHADOW LIVES, which depends on whether the register bank is
 -- open. VICE has two different mappings for a bank $00 read of $E000-$FFFF and
