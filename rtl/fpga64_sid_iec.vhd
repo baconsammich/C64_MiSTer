@@ -188,6 +188,8 @@ port(
 	scpu_rldos_b1_o  : out std_logic;
 	-- and an opcode FETCH there, which is execution rather than a data read
 	scpu_rldos_exe_o : out std_logic;
+	-- one pulse per 65C816 clock enable, so main.vhd can measure the real speed
+	scpu_en_o        : out std_logic;
 	scpu_ramlink   : in  std_logic := '0';  -- a RAMLink is present
 	scpu_mem_addr  : out unsigned(15 downto 0);
 	scpu_mem_dout  : out unsigned(7 downto 0);
@@ -354,6 +356,9 @@ signal scpu_kernal_sel : std_logic;
 signal scpu_rldos_sel  : std_logic;   -- a DOS-extension window, mirrored 1:1 from bank $01
 signal scpu_kernal_own : std_logic;   -- kernal_sel, unless JiffyDOS owns the window
 signal scpu_rl_probe   : std_logic;   -- the BIOS RAMLink signature read at $E0AB
+signal scpu_ce_tick    : std_logic := '0';  -- every other clock
+signal scpu_ce         : std_logic;   -- private-memory enable, independent of sysCycle
+signal scpu_en_816     : std_logic;   -- what the 65C816 actually runs on
 signal scpu_di         : unsigned(7 downto 0);
 signal scpu_vec_reroute : std_logic;
 signal scpu_bank00     : std_logic;
@@ -1050,7 +1055,7 @@ scpu: entity work.cpu_65c816
 port map (
 	clk => clk32,
 	reset => reset,
-	enable => enableCpu and not dma_active and scpu_enable,
+	enable => scpu_en_816,
 	nmi_n => irq_cia2 and nmi_n,
 	nmi_ack => nmiAck_816,
 	irq_n => irq_cia1 and irq_vic and irq_n and irq_ext_n,
@@ -1384,6 +1389,44 @@ scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_
                                scpu_rldos_sel) = '1')) else '0';
 scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 
+-- PRIVATE ACCESSES DO NOT NEED A sysCycle SLOT.
+--
+-- The accelerator only gets four enables per PHI2 -- CPU0, CPU4, CPU8 from the
+-- turbo slots and CPUC from the natural 1 MHz one -- which is where the ~4 MHz
+-- comes from. But those slots exist to arbitrate the C64 bus, and an access the
+-- accelerator answers out of its OWN memory (bank $01, bank $F8, the bypass
+-- windows) never touches that bus: cpuAddr is masked to $0100 and cpuWe to 0 for
+-- exactly that reason. Such an access can therefore run on its own enable.
+--
+-- One every other clock, which is what tb_65816_mvn says is safe. At CE 1-in-2 it
+-- copies all three banks 8192 of 8192 against the real dualport_2clk_ram and
+-- finishes in half the time of 1-in-4; the registered block RAM output is not a
+-- barrier at that rate. 1-in-1 is NOT claimed -- the block RAM read would have to
+-- complete in the same cycle it is addressed.
+--
+-- Deliberately NOT done here: adding cpu_cyc slots. cpu_cyc drives ramCE together
+-- with CYCLE_VIC0, and a private access presenting $0100 decodes as RAM, so extra
+-- slots would put dummy cycles on the VIC's port. enableCpu also keeps its exact
+-- current meaning, because io_enable, the 6510, the cpuWe write-replay gating and
+-- the DMA hold are all written against it.
+--
+-- turbo_mode(1) is scpu_run AND the SuperCPU fast flag, so a software or switch
+-- request for 1 MHz closes this down exactly as it already closes the turbo
+-- slots, and the accelerator falls back to CPUC alone.
+scpu_ce         <= '1' when scpu_enable = '1' and turbo_mode(1) = '1' and
+                            scpu_mem_hit = '1' and scpu_ce_tick = '1' and
+                            dma_active = '0' and baLoc = '1' else '0';
+
+scpu_en_816     <= (enableCpu and not dma_active and scpu_enable) or scpu_ce;
+scpu_en_o       <= scpu_en_816;
+
+process(clk32)
+begin
+   if rising_edge(clk32) then
+      scpu_ce_tick <= not scpu_ce_tick;
+   end if;
+end process;
+
 -- A read actually being served out of an RL-DOS window, as opposed to the window
 -- merely being open.
 scpu_rldos_hit_o <= '1' when scpu_shadow_hit = '1' and bank_816 = x"00" and
@@ -1444,7 +1487,7 @@ scpu_mem_dout   <= cpuDo_816;
 -- bank $00 goes out to the C64 bus like any other.
 scpu_shadow_we  <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and bank_816 = x"01" and
                             cpuWe_816 = '1' and (vda_816 or vpa_816) = '1' and
-                            baLoc = '1' and enableCpu = '1' else '0';
+                            baLoc = '1' and scpu_en_816 = '1' else '0';
 
 cpuAddr_pre <= cpuAddr_6510 when scpu_enable = '0' else
                cpuAddr_816  when (busCyc_816 and not scpu_mem_hit) = '1' else x"0100";
