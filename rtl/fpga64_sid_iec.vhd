@@ -1206,20 +1206,25 @@ scpu_kernal_sel <= '1' when cpuAddr_816(15 downto 13) = "111" and cpuIO(1) = '1'
 -- This costs nothing here. On real hardware the shadow exists because reading
 -- physical ROM at 20 MHz is too slow; in this core the C64's KERNAL is already
 -- single-cycle block RAM, so there is no slow path to avoid.
--- THE ACCELERATOR KEEPS $E000-$FBE0. Standing aside for JiffyDOS here does not
--- work and cannot be made to work by gating on bootmap.
+-- WHO OWNS $E000-$FBE0: the accelerator, or JiffyDOS.
 --
--- The BIOS clears bootmap and then goes on running from $E000-$FBE0 for a long
--- time: it paints its logo and waits 100 raster interrupts before the C64 KERNAL
--- is ever entered. Swapping that window for JiffyDOS pulls the code out from
--- under a running BIOS, which dies and resets, which re-arms bootmap. Measured as
--- word 1 = $CAC0 -- enabled, register bank open, bootmap SET, JiffyDOS switch on
--- -- the stuck-BIOS signature, and a black screen.
+-- RESTORED. This was removed on the theory that standing aside pulls code out
+-- from under a BIOS still painting its logo and waiting 100 raster interrupts.
+-- That theory was wrong, and an earlier hardware reading already said so: on the
+-- build this is being restored to match, the user confirmed JiffyDOS commands
+-- working with the SuperCPU running, with this stand-aside active. Both routes
+-- were then retested and both work -- the Kernal menu and the SuperCPU JiffyDOS
+-- switch.
 --
--- scpu_shadow_hit and scpu_shadow_byp already require bootmap = '0', so the
--- damage is after that point and no bootmap gate reaches it. JiffyDOS has to get
--- into what the BIOS COPIES, not be substituted for it afterwards.
-scpu_kernal_own <= scpu_kernal_sel;
+-- $FBE1 upwards always stays with the accelerator: that is where the BIOS writes
+-- its interrupt redirection table and its own vectors, and serving those from
+-- anywhere else breaks the interrupt path. Only below it is handed over.
+--
+-- It costs nothing here. On real hardware the shadow exists because reading
+-- physical ROM at 20 MHz is too slow; in this core the C64 KERNAL is already
+-- single-cycle block RAM, so there is no slow path to avoid.
+scpu_kernal_own <= '0' when scpu_jiffy_i = '1' and cpuAddr_816 < x"FBE1" else
+                   scpu_kernal_sel;
 
 scpu_rldos_sel  <= '1' when scpu_dosext = '1' and
                             ((cpuAddr_816 >= x"1000" and cpuAddr_816 <= x"5FFF") or
