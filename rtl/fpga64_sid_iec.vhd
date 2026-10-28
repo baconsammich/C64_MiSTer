@@ -366,7 +366,7 @@ signal scpu_shadow_byp : std_logic;
 -- Read the KERNAL and BASIC from the accelerator ROM rather than the corrupt
 -- shadow; see the full note at the scpu_shadow_byp assignment below.
 constant C_SCPU_SHADOW_BYPASS : boolean := true;
-constant C_SCPU_PRIVATE_CE    : boolean := true;
+constant C_SCPU_PRIVATE_CE    : boolean := false;
 signal vic_d011_q      : unsigned(7 downto 0) := (others => '0');
 signal vic_d020_q      : unsigned(7 downto 0) := (others => '0');
 signal emul_816        : std_logic;
@@ -1398,8 +1398,15 @@ scpu_mem_hit    <= scpu_rom_hit or scpu_shadow_hit;
 -- Suppressing scpu_ce for one clock after ANY enable makes the worst case exactly
 -- the 1-in-2 the bench has validated. enableCpu itself is never suppressed, so the
 -- C64-bus timing the rest of the core depends on is untouched.
--- C_SCPU_PRIVATE_CE turns the faster private-memory enable on. ON: the menu
--- rework it was held back for is tested and working, so this is stage (a) live.
+-- C_SCPU_PRIVATE_CE turns the faster private-memory enable on. OFF, and it must
+-- STAY off until the hardware says otherwise: turned on, the SuperCPU does not
+-- boot at all (mega65_r6_20mhz.bit, WNS=0.093 so this is not a timing failure).
+--
+-- tb_65816_mvn passes at CE 1-in-2 and that bench was wrong about the hardware.
+-- It drives the processor against a model, and the thing it cannot show is the
+-- real sequencing of a registered block RAM read against an enable that arrives
+-- off the sysCycle grid. Do not re-enable this on the strength of the bench
+-- alone -- the next attempt needs a bench that reproduces the no-boot first.
 --
 -- Rate: clk32 is 31.5 MHz and scpu_ce_tick halves it, so a run of private-memory
 -- accesses executes at about 15.75 MHz against the roughly 4 MHz the shared
