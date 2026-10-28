@@ -355,6 +355,7 @@ signal scpu_basic_sel  : std_logic;
 signal scpu_kernal_sel : std_logic;
 signal scpu_rldos_sel  : std_logic;   -- a DOS-extension window, mirrored 1:1 from bank $01
 signal scpu_kernal_own : std_logic;   -- kernal_sel, unless JiffyDOS owns the window
+signal scpu_rl_probe   : std_logic;   -- the BIOS RAMLink signature read at $E0AB
 signal scpu_ce_tick    : std_logic := '0';  -- every other clock
 signal scpu_ce         : std_logic;   -- private-memory enable, independent of sysCycle
 signal scpu_en_816     : std_logic;   -- what the 65C816 actually runs on
@@ -1345,10 +1346,47 @@ port map (
 	reroute_o    => scpu_vec_reroute
 );
 
+-- THE RAMLINK PROBE WINDOW. $E000-$FFFF goes to the cartridge, briefly.
+--
+-- The BIOS decides whether a RAMLink exists by reading ONE byte, at scpu.rom
+-- offset $314 -- confirmed by reading the ROM, not from a summary:
+--     $0317  BIT $D0B0   ; V := bit 6
+--     $031A  BVC +9      ; V clear skips the probe
+--     $031C  STA $D0BE   ; DOS extensions ON
+--     $031F  LDA $E0AB   ; the signature
+--     $0322  STA $D0BF   ; DOS extensions OFF
+--     $0325  CMP #$7E
+--     $0327  BNE +$66    ; skip the entire RL-DOS install
+--     $032E  STA $DF7E   ; only reached when the compare passes
+--
+-- Neither image in scpu.rom can satisfy it: the normal KERNAL has $C8 at $E0AB
+-- and the ALT KERNAL has $F6. Only the cartridge has $7E -- ramlink.rom[$A0AB],
+-- the high half of the RAMLink fixed bank 2, which rl_claim_kernal already
+-- serves once the read arrives.
+--
+-- Without this, the probe only passes when the SuperCPU JiffyDOS switch happens
+-- to be on, because that switch is what clears scpu_kernal_own and lets $E0AB
+-- fall through to the bus. On real hardware the probe does not depend on that
+-- switch, and this makes it switch-independent.
+--
+-- bootmap is deliberately NOT in the condition: this ROM clears it with
+-- STA $D0B6 at $019C, long before the probe, so a bootmap term would never fire
+-- and the whole thing would be inert. The ROM's own $D0BE/$D0BF bracket is used
+-- instead -- three instructions, around this read and nothing else on the boot
+-- path, which is what makes it safe. An unconditional hand-over black-screened
+-- the machine twice, because the BIOS keeps executing from $E000-$FBE0 long
+-- after bootmap clears.
+scpu_rl_probe   <= '1' when scpu_ramlink = '1' and
+                            scpu_dosext = '1' and scpu_hwenable = '1' and
+                            bank_816 = x"00" and cpuWe_816 = '0' and
+                            cpuAddr_816(15 downto 13) = "111"
+                   else '0';
+
 scpu_rom_hit    <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
                             (bank_816 = x"F8" or
                              (bank_816 = x"00" and scpu_bootmap = '1' and cpuWe_816 = '0' and
-                              scpu_boot_win = '1' and scpu_io_win = '0') or
+                              scpu_boot_win = '1' and scpu_io_win = '0' and
+                              scpu_rl_probe = '0') or
                              scpu_vec_reroute = '1' or
                              scpu_shadow_byp = '1') else '0';
 scpu_shadow_hit <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and (vda_816 or vpa_816) = '1' and
@@ -1493,7 +1531,16 @@ scpu_mem_dout   <= cpuDo_816;
 -- bank $00 goes out to the C64 bus like any other.
 scpu_shadow_we  <= '1' when scpu_enable = '1' and scpu_shadow_on = '1' and bank_816 = x"01" and
                             cpuWe_816 = '1' and (vda_816 or vpa_816) = '1' and
-                            baLoc = '1' and scpu_en_816 = '1' else '0';
+                            baLoc = '1' and enableCpu = '1' else '0';
+-- enableCpu, NOT scpu_en_816. This was scpu_en_816 between 4d704de and here, and
+-- that quietly added "not dma_active" to the write-enable, because scpu_en_816 is
+-- (enableCpu and not dma_active and scpu_enable) once the private CE is off.
+--
+-- Bank $01 is where the BIOS MVNs RL-DOS: $F8:1000-$5FFF -> $01:1000-$5FFF and
+-- $F8:6000-$7FFF -> $01:8000-$9FFF, about 20 kB of writes. The RAMCard page cache
+-- asserts DMA constantly while it fetches, so with dma_active in this condition
+-- those writes are dropped and RL-DOS lands in bank $01 incomplete -- which is
+-- device 16 answering at e9e0f0e and not answering afterwards.
 
 cpuAddr_pre <= cpuAddr_6510 when scpu_enable = '0' else
                cpuAddr_816  when (busCyc_816 and not scpu_mem_hit) = '1' else x"0100";
