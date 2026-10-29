@@ -18,9 +18,13 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	input         img_readonly,
 	input  [31:0] img_size,
 	
-	// 00 - 1541 emulated GCR(D64)
-	// 01 - 1541 real GCR mode (G64,D64)
-	// 10 - 1581 (D81)
+	// THREE bits, expanded by main.vhd from the framework two. vdrives.vhd stays
+	// 2-bit so M2M/ remains core-independent; code 01 there was G64, which the
+	// Shell never sends, and main.vhd maps it to 100 here. doc/drive_models.md 4.7.
+	// 000 - 1541 emulated GCR (D64)
+	// 010 - 1581 (D81)
+	// 011 - CMD HD
+	// 100 - 1571 (D71), once c157x_multi is instantiated
 	input   [2:0] img_type,
 
 	// MEGA65 physical internal 1581 (issues #90 and #93): per-drive mode select.
