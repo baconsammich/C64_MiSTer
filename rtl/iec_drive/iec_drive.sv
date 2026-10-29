@@ -377,7 +377,14 @@ c157x_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c157x
 	.img_size(img_size),
 	.img_readonly(img_readonly),
 	.img_ds(is_157x),
-	.img_gcr(~is_157x),
+	// 1 = SECTOR mode, the OPPOSITE polarity to the c1541 engine gcr_mode:
+	// c157x_drv.sv:180 has sector_mode = img_gcr & ~img_mfm, and
+	// c157x_track.sv:134 uses sector_mode to pick the sector table over a raw
+	// track number. Every image this engine serves here is a GCR sector image
+	// -- .d64 and .d71 -- since .G64 never reaches the core and MFM is tied
+	// low, so this is all ones. It was ~is_157x, which read as raw GCR for a
+	// .d71 because I took the name to mean the same as the c1541 signal.
+	.img_gcr({NDR{1'b1}}),
 	.img_mfm({NDR{1'b0}}),
 
 	.led(c1541_led),
