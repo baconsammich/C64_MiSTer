@@ -5,7 +5,13 @@
 //
 //-------------------------------------------------------------------------------
  
-module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
+module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2,
+                  // 0 = the c1541/c1581 engines this core has always run.
+                  // 1 = the vendored c157x engine, which adds the 1570/1571.
+                  // Default 0 until the 157x path has run on hardware: the
+                  // generate below synthesises exactly one of them, so with
+                  // this at 0 nothing about the working drives changes.
+                  USE_C157X=0)
 (
 	//clk ports
 	input         clk,
@@ -58,6 +64,13 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	output reg  [N:0] sd_wr,
 	input   [N:0] sd_ack,
 	input  [13:0] sd_buff_addr,
+
+	// External per-drive DOS ROM store, only used when USE_C157X=1. c157x_multi
+	// holds no ROM of its own: it presents one address per drive and needs every
+	// one answered in the same cycle. Flat vectors because the store that serves
+	// them (CORE/vhdl/drive_rom_157x.vhd) is VHDL. See doc/drive_models.md 4.5.
+	output [15*DRIVES-1:0] rom157x_addr_o,
+	input  [ 8*DRIVES-1:0] rom157x_data_i,
 	input   [7:0] sd_buff_dout,
 	output reg [7:0] sd_buff_din[NDR],
 	input         sd_buff_wr,
@@ -157,7 +170,10 @@ localparam N   = NDR - 1;
 // sd_rd/sd_wr gating.
 wire [N:0] phys_mode_vec = physical_mode;
 
-reg [N:0] dtype[2];
+// THREE bit-slices, not two. The fourth state is the 1571: img_type 100 cannot
+// be held in two bits, and dtype is what every engine-enable below is built on.
+//   000 1541   010 1581   011 CMD HD   100 1571
+reg [N:0] dtype[3];
 wire        c1541_iec_data, c1541_iec_clk, c1541_stb_o;
 wire  [7:0] c1541_par_o;
 wire  [N:0] c1541_led;
@@ -191,7 +207,26 @@ wire  [N:0] c1581_sd_rd, c1581_sd_wr;
 // again. The 1581 engine is live only while a D81 is mounted or in physical mode. The latch
 // stays level-sensitive: the strobe is held for many clk cycles while img_size/img_type
 // arrive through separate synchronizers, so the last strobe cycle wins with settled values.
-always @(posedge clk) for(int i=0; i<NDR; i=i+1) if(img_mounted[i]) {dtype[1][i],dtype[0][i]} <= (|img_size) ? img_type[1:0] : 2'b00;
+always @(posedge clk) for(int i=0; i<NDR; i=i+1) if(img_mounted[i]) {dtype[2][i],dtype[1][i],dtype[0][i]} <= (|img_size) ? img_type : 3'b000;
+
+// This drive is a 1571, which only the c157x engine can be. Kept as its own name
+// because it gates an engine, a drv_mode and a double-sided flag, and spelling
+// dtype[2] at each of them is how an index goes wrong.
+wire [N:0] is_157x = dtype[2];
+
+// c157x_multi takes unpacked arrays; the ROM store across the VHDL boundary takes
+// flat vectors. Convert here rather than at the port, so the instantiation reads
+// like the upstream one and the packing is in one place.
+wire  [1:0] drv_mode[NDR];
+wire [14:0] mem_a_arr[NDR];
+wire  [7:0] rom_do_arr[NDR];
+
+// 10 is the 1571, 00 the 1541. The 1570 (01) and the 1571CR (11) are not offered:
+// the CR is marked todo upstream with its RAM commented out.
+for (genvar gi = 0; gi < NDR; gi = gi + 1) begin : g_drvmode
+	assign drv_mode[gi]  = is_157x[gi] ? 2'b10 : 2'b00;
+	assign rom_do_arr[gi] = rom157x_data_i[gi*8 + 7 -: 8];
+end
 
 assign led          = c1581_led      | c1541_led;     // MEGA65 (D81): 1581 engine enabled
 assign iec_data_o   = c1581_iec_data & c1541_iec_data;
@@ -229,6 +264,9 @@ always_comb for(int i=0; i<NDR; i=i+1) begin
 	sd_wr[i]       = phys_mode_vec[i] ? 1'b0 : (dtype[1][i] ? c1581_sd_wr[i] : c1541_sd_wr[i]);
 	sd_blk_cnt[i]  = (dtype[1][i] ? 6'd1                  : c1541_sd_blk_cnt[i]   );
 end
+
+generate
+if (!USE_C157X) begin : g_c1541
 
 c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 (
@@ -283,6 +321,88 @@ c1541_multi #(.PARPORT(PARPORT), .DUALROM(DUALROM), .DRIVES(DRIVES)) c1541
 	.sd_buff_din(c1541_sd_buff_dout),
 	.sd_buff_wr(sd_buff_wr)
 );
+
+// Nothing reads the store in this branch, so give it a defined value rather than
+// leaving an output floating.
+assign rom157x_addr_o = '0;
+
+end else begin : g_c157x
+
+// The vendored 1541/1570/1571 engine. Differences from the block above that are
+// NOT cosmetic, each from doc/drive_models.md:
+//
+//   drv_mode   per drive, 00 = 1541 and 10 = 1571. 01 is the 1570 and 11 the
+//              1571CR, which upstream marks todo and whose RAM is commented
+//              out, so neither is offered (4.2).
+//   img_mfm    TIED LOW. MFM on a 1571 reads CP/M and MS-DOS disks, which is
+//              not what a C64 core is for, and dropping it takes
+//              TRACK_BUF_LEN to 8192 so per-drive block RAM stays as it is (4.2).
+//   iec_fclk   left open. A real C64 has no fast serial -- CIA1 SP and CNT are
+//              not on the IEC connector, which is exactly why a 1571 runs in
+//              1541 mode on a C64 -- so burst mode legitimately cannot work
+//              here and pretending otherwise would be worse (4.3).
+//   ROM        external, one block RAM per drive, addressed through
+//              rom157x_addr_o / rom157x_data_i (4.5).
+//   sd_buff_addr is 16 bits here against our 14, so it is zero-extended. That
+//              caps the transfer buffer at 16 kB, which is far more than a
+//              block transfer uses.
+c157x_multi #(.PARPORT(PARPORT), .DRIVES(DRIVES)) c157x
+(
+	.clk(clk),
+	.reset(reset | dtype[1] | phys_mode_vec),
+	.ce(ce),
+	.pause(pause),
+
+	.drv_mode(drv_mode),
+
+	.img_mounted(img_mounted),
+	.img_size(img_size),
+	.img_readonly(img_readonly),
+	.img_ds(is_157x),
+	.img_gcr(~is_157x),
+	.img_mfm({NDR{1'b0}}),
+
+	.led(c1541_led),
+	.disk_ready(),
+	.out_track(),
+	.out_we(),
+
+	.iec_atn_i (iec_atn_i),
+	.iec_data_i(iec_data_i & c1581_iec_data),
+	.iec_clk_i (iec_clk_i  & c1581_iec_clk),
+	.iec_fclk_i(1'b1),
+	.iec_data_o(c1541_iec_data),
+	.iec_clk_o (c1541_iec_clk),
+	.iec_fclk_o(),
+
+	.par_data_i(par_data_i),
+	.par_stb_i(par_stb_i),
+	.par_data_o(c1541_par_o),
+	.par_stb_o(c1541_stb_o),
+
+	.clk_sys(clk_sys),
+
+	.sd_lba(c1541_sd_lba),
+	.sd_blk_cnt(c1541_sd_blk_cnt),
+	.sd_rd(c1541_sd_rd),
+	.sd_wr(c1541_sd_wr),
+	.sd_ack(sd_ack),
+	.sd_buff_addr({2'b00, sd_buff_addr}),
+	.sd_buff_dout(sd_buff_dout),
+	.sd_buff_din(c1541_sd_buff_dout),
+	.sd_buff_wr(sd_buff_wr),
+
+	.mem_a(mem_a_arr),
+	.rom_do(rom_do_arr),
+	.empty8k({NDR{1'b0}})
+);
+
+for (genvar gj = 0; gj < NDR; gj = gj + 1) begin : g_rompack
+	assign rom157x_addr_o[gj*15 + 14 -: 15] = mem_a_arr[gj];
+end
+
+end
+endgenerate
 
 
 // MEGA65 (D81 enable, sy2002): the 1581 engine is now active. Reset is released only while
