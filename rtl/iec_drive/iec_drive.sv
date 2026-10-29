@@ -21,7 +21,7 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2)
 	// 00 - 1541 emulated GCR(D64)
 	// 01 - 1541 real GCR mode (G64,D64)
 	// 10 - 1581 (D81)
-	input   [1:0] img_type,
+	input   [2:0] img_type,
 
 	// MEGA65 physical internal 1581 (issues #90 and #93): per-drive mode select.
 	// Bit i set = drive i is backed by the real internal 3.5" drive: its 1581
@@ -187,7 +187,7 @@ wire  [N:0] c1581_sd_rd, c1581_sd_wr;
 // again. The 1581 engine is live only while a D81 is mounted or in physical mode. The latch
 // stays level-sensitive: the strobe is held for many clk cycles while img_size/img_type
 // arrive through separate synchronizers, so the last strobe cycle wins with settled values.
-always @(posedge clk) for(int i=0; i<NDR; i=i+1) if(img_mounted[i]) {dtype[1][i],dtype[0][i]} <= (|img_size) ? img_type : 2'b00;
+always @(posedge clk) for(int i=0; i<NDR; i=i+1) if(img_mounted[i]) {dtype[1][i],dtype[0][i]} <= (|img_size) ? img_type[1:0] : 2'b00;
 
 assign led          = c1581_led      | c1541_led;     // MEGA65 (D81): 1581 engine enabled
 assign iec_data_o   = c1581_iec_data & c1541_iec_data;
