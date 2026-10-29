@@ -11,7 +11,7 @@ module iec_drive #(parameter PARPORT=1,DUALROM=1,DRIVES=2,
                   // Default 0 until the 157x path has run on hardware: the
                   // generate below synthesises exactly one of them, so with
                   // this at 0 nothing about the working drives changes.
-                  USE_C157X=0)
+                  USE_C157X=1)
 (
 	//clk ports
 	input         clk,
